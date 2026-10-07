@@ -186,7 +186,7 @@ class CalendarDatePicker(ttk.Frame):
 class ShiftPlannerApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Arbeitsplan Generator mit fairem Mo/Fr HO-Turnus")
+        self.root.title("Arbeitsplan Generator mit striktem Mo/Fr HO-Wechsel")
         self.root.geometry("1280x860")
 
         self.employees = []   # List of dicts: {'name': str, 'pensum': int, 'fixed_off': int or None}
@@ -494,14 +494,21 @@ class ShiftPlannerApp:
         unstaffed_warnings = []
         shift_counts = {emp['name']: {"Frühschicht": 0, "Spätschicht": 0} for emp in self.employees}
 
-        # Zähler für fair gewichteten Turnus bei Freitag & Montag Homeoffice
+        # Zähler für fair gewichteten Turnus
         monday_ho_counts = defaultdict(int)
         friday_ho_counts = defaultdict(int)
+
+        # Tracking der Personen, die in der VORWOCHE Montag / Freitag HO hatten
+        last_week_monday_ho_emps = set()
+        last_week_friday_ho_emps = set()
 
         # 2. Chronologische wochenweise Berechnung
         for (year, week_num), week_days in sorted(weeks_dict.items()):
             
-            # Wöchentliches HO-Limit festlegen (Pensum berücksichtigen)
+            this_week_monday_ho_emps = set()
+            this_week_friday_ho_emps = set()
+
+            # Wöchentliches HO-Limit festlegen
             weekly_ho_max = {}
             for emp in self.employees:
                 e_name = emp['name']
@@ -562,8 +569,10 @@ class ShiftPlannerApp:
                                 ho_weekly_count[e_name] += 1
                                 if day.weekday() == 0:
                                     monday_ho_counts[e_name] += 1
+                                    this_week_monday_ho_emps.add(e_name)
                                 elif day.weekday() == 4:
                                     friday_ho_counts[e_name] += 1
+                                    this_week_friday_ho_emps.add(e_name)
                         else:
                             plan[e_name][day] = w_type
                             shift_counts[e_name][w_type] += 1
@@ -585,10 +594,12 @@ class ShiftPlannerApp:
                                 ho_weekly_count[e_name] += 1
                                 if day.weekday() == 0:
                                     monday_ho_counts[e_name] += 1
+                                    this_week_monday_ho_emps.add(e_name)
                                 elif day.weekday() == 4:
                                     friday_ho_counts[e_name] += 1
+                                    this_week_friday_ho_emps.add(e_name)
 
-            # F. Faire Turnus-Verteilung für FREITAG Homeoffice (Minimale Freitag-Anzahl gewinnt)
+            # F. Faire Turnus-Verteilung für FREITAG Homeoffice (mit Vorwochen-Sperre)
             friday = next((d for d in week_days if d.weekday() == 4), None)
             if friday:
                 friday_has_ho = any(plan[e['name']].get(friday) == "Homeoffice" for e in self.employees)
@@ -605,14 +616,19 @@ class ShiftPlannerApp:
                                 friday_candidates.append(e_name)
 
                     if friday_candidates:
-                        # Sortieren nach geringster Anzahl bisheriger Freitag-HOs
+                        # REGEL: Wer in der Vorwoche am Freitag HO hatte, wird bevorzugt ausgeschlossen
+                        filtered = [name for name in friday_candidates if name not in last_week_friday_ho_emps]
+                        if filtered:
+                            friday_candidates = filtered
+
                         friday_candidates.sort(key=lambda name: (friday_ho_counts[name], random.random()))
                         selected_emp = friday_candidates[0]
                         plan[selected_emp][friday] = "Homeoffice"
                         ho_weekly_count[selected_emp] += 1
                         friday_ho_counts[selected_emp] += 1
+                        this_week_friday_ho_emps.add(selected_emp)
 
-            # G. Faire Turnus-Verteilung für MONTAG Homeoffice (Minimale Montag-Anzahl gewinnt)
+            # G. Faire Turnus-Verteilung für MONTAG Homeoffice (mit Vorwochen-Sperre)
             monday = next((d for d in week_days if d.weekday() == 0), None)
             if monday:
                 monday_has_ho = any(plan[e['name']].get(monday) == "Homeoffice" for e in self.employees)
@@ -629,12 +645,17 @@ class ShiftPlannerApp:
                                 monday_candidates.append(e_name)
 
                     if monday_candidates:
-                        # Sortieren nach geringster Anzahl bisheriger Montag-HOs
+                        # REGEL: Wer in der Vorwoche am Montag HO hatte, wird bevorzugt ausgeschlossen
+                        filtered = [name for name in monday_candidates if name not in last_week_monday_ho_emps]
+                        if filtered:
+                            monday_candidates = filtered
+
                         monday_candidates.sort(key=lambda name: (monday_ho_counts[name], random.random()))
                         selected_emp = monday_candidates[0]
                         plan[selected_emp][monday] = "Homeoffice"
                         ho_weekly_count[selected_emp] += 1
                         monday_ho_counts[selected_emp] += 1
+                        this_week_monday_ho_emps.add(selected_emp)
 
             # H. Automatische Verteilung verbleibender Homeofficetage
             shuffled_emps = list(self.employees)
@@ -667,8 +688,10 @@ class ShiftPlannerApp:
                     ho_weekly_count[e_name] += 1
                     if selected_day.weekday() == 0:
                         monday_ho_counts[e_name] += 1
+                        this_week_monday_ho_emps.add(e_name)
                     elif selected_day.weekday() == 4:
                         friday_ho_counts[e_name] += 1
+                        this_week_friday_ho_emps.add(e_name)
 
             # I. Schichteinteilung (Früh- vs. Spätschicht) vor Ort
             for day in week_days:
@@ -698,6 +721,10 @@ class ShiftPlannerApp:
                     else:
                         plan[emp_name][day] = "Spätschicht"
                         shift_counts[emp_name]["Spätschicht"] += 1
+
+            # Vorwochen-Tracker für die nächste Kalenderwoche aktualisieren
+            last_week_monday_ho_emps = this_week_monday_ho_emps
+            last_week_friday_ho_emps = this_week_friday_ho_emps
 
         if unstaffed_warnings:
             messagebox.showwarning(

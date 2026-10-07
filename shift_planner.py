@@ -18,12 +18,15 @@ except ImportError:
 
 # --- FARBLEGENDE (Pastelltöne) ---
 COLOR_CONFIG = {
-    "Frühschicht": {"bg": "#D4EDDA", "fg": "#155724", "desc": "Frühschicht (07:30 - 16:30)"},
-    "Spätschicht": {"bg": "#A8E6CF", "fg": "#0B5345", "desc": "Spätschicht (08:30 - 17:30)"},
-    "Homeoffice":  {"bg": "#D0E8FF", "fg": "#0C5460", "desc": "Homeoffice"},
-    "Ferien":      {"bg": "#E2E3E5", "fg": "#383D41", "desc": "Ferien"},
-    "Unterbesetzt":{"bg": "#F8D7DA", "fg": "#721C24", "desc": "Fehlende Besetzung!"}
+    "Frühschicht":     {"bg": "#D4EDDA", "fg": "#155724", "desc": "Frühschicht (07:30 - 16:30)"},
+    "Spätschicht":     {"bg": "#A8E6CF", "fg": "#0B5345", "desc": "Spätschicht (08:30 - 17:30)"},
+    "Homeoffice":      {"bg": "#D0E8FF", "fg": "#0C5460", "desc": "Homeoffice"},
+    "Teilzeit (Frei)": {"bg": "#E2E3E5", "fg": "#383D41", "desc": "Teilzeit / Fixer Freitag"},
+    "Ferien":          {"bg": "#E2E3E5", "fg": "#383D41", "desc": "Ferien"},
+    "Unterbesetzt":    {"bg": "#F8D7DA", "fg": "#721C24", "desc": "Fehlende Besetzung!"}
 }
+
+WEEKDAYS_LIST = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag"]
 
 
 class CalendarDatePicker(ttk.Frame):
@@ -183,10 +186,10 @@ class CalendarDatePicker(ttk.Frame):
 class ShiftPlannerApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Arbeitsplan Generator mit zufälliger HO- & Schichtverteilung")
-        self.root.geometry("1240x840")
+        self.root.title("Arbeitsplan Generator mit Pensum & Zufallsverteilung")
+        self.root.geometry("1280x860")
 
-        self.employees = []
+        self.employees = []   # List of dicts: {'name': str, 'pensum': int, 'fixed_off': int or None}
         self.wishes = []      # {'emp': str, 'date': date, 'type': str}
         self.vacations = []   # {'emp': str, 'start': date, 'end': date}
 
@@ -210,14 +213,25 @@ class ShiftPlannerApp:
         self.dp_end.grid(row=0, column=3, padx=5, pady=2, sticky="w")
 
         # 2. Mitarbeiter
-        emp_frame = ttk.LabelFrame(control_frame, text="1. Mitarbeiter", padding=5)
+        emp_frame = ttk.LabelFrame(control_frame, text="1. Mitarbeiter & Pensum", padding=5)
         emp_frame.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=5, pady=5)
 
+        ttk.Label(emp_frame, text="Name:").grid(row=0, column=0, sticky="w")
         self.ent_emp_name = ttk.Entry(emp_frame, width=15)
-        self.ent_emp_name.pack(side="top", anchor="w", padx=2, pady=2)
+        self.ent_emp_name.grid(row=0, column=1, padx=2, pady=2, sticky="w")
+
+        ttk.Label(emp_frame, text="Pensum:").grid(row=1, column=0, sticky="w")
+        self.cmb_pensum = ttk.Combobox(emp_frame, values=["100%", "80%", "60%"], width=13, state="readonly")
+        self.cmb_pensum.grid(row=1, column=1, padx=2, pady=2, sticky="w")
+        self.cmb_pensum.current(0)
+
+        ttk.Label(emp_frame, text="Fixer Freitag:").grid(row=2, column=0, sticky="w")
+        self.cmb_fixed_off = ttk.Combobox(emp_frame, values=["Keiner"] + WEEKDAYS_LIST, width=13, state="readonly")
+        self.cmb_fixed_off.grid(row=2, column=1, padx=2, pady=2, sticky="w")
+        self.cmb_fixed_off.current(0)
 
         emp_btn_subframe = tk.Frame(emp_frame)
-        emp_btn_subframe.pack(side="top", fill="x", pady=2)
+        emp_btn_subframe.grid(row=3, column=0, columnspan=2, pady=4, sticky="w")
 
         btn_add_emp = ttk.Button(emp_btn_subframe, text="+ Hinzufügen", command=self.add_employee)
         btn_add_emp.pack(side="left", padx=(0, 2))
@@ -225,8 +239,8 @@ class ShiftPlannerApp:
         btn_rem_emp = ttk.Button(emp_btn_subframe, text="- Entfernen", command=self.remove_employee)
         btn_rem_emp.pack(side="left")
 
-        self.lst_employees = tk.Listbox(emp_frame, height=4, width=22)
-        self.lst_employees.pack(side="bottom", fill="both", expand=True, pady=2)
+        self.lst_employees = tk.Listbox(emp_frame, height=4, width=28)
+        self.lst_employees.grid(row=4, column=0, columnspan=2, pady=2, sticky="nsew")
 
         # 3. Wünsche
         wish_frame = ttk.LabelFrame(control_frame, text="2. Wunschtage", padding=5)
@@ -319,17 +333,44 @@ class ShiftPlannerApp:
         self.result_container = ttk.LabelFrame(self.root, text="Arbeitsplan Matrix (Wochenübersicht)", padding=5)
         self.result_container.pack(fill="both", expand=True, padx=10, pady=5)
 
-        # Beispieldaten
-        for name in ["Anna", "Ben", "Clara", "David"]:
-            self.employees.append(name)
-            self.lst_employees.insert(tk.END, name)
+        # Beispieldaten erzeugen
+        sample_data = [
+            {'name': 'Anna',  'pensum': 100, 'fixed_off': None},
+            {'name': 'Ben',   'pensum': 80,  'fixed_off': 2},  # Mi frei
+            {'name': 'Clara', 'pensum': 100, 'fixed_off': None},
+            {'name': 'David', 'pensum': 80,  'fixed_off': 4}   # Fr frei
+        ]
+        for emp in sample_data:
+            self._insert_employee_object(emp)
+
+    def _insert_employee_object(self, emp_obj):
+        self.employees.append(emp_obj)
+        off_str = f" - Frei: {WEEKDAYS_LIST[emp_obj['fixed_off']][:2]}" if emp_obj['fixed_off'] is not None else ""
+        disp = f"{emp_obj['name']} ({emp_obj['pensum']}%{off_str})"
+        self.lst_employees.insert(tk.END, disp)
 
     def add_employee(self):
         name = self.ent_emp_name.get().strip()
-        if name and name not in self.employees:
-            self.employees.append(name)
-            self.lst_employees.insert(tk.END, name)
-            self.ent_emp_name.delete(0, tk.END)
+        if not name:
+            messagebox.showwarning("Hinweis", "Bitte einen Namen eingeben.")
+            return
+
+        if any(e['name'] == name for e in self.employees):
+            messagebox.showwarning("Hinweis", f"Mitarbeiter '{name}' existiert bereits.")
+            return
+
+        pensum_val = int(self.cmb_pensum.get().replace("%", ""))
+        fixed_off_str = self.cmb_fixed_off.get()
+
+        fixed_off_idx = WEEKDAYS_LIST.index(fixed_off_str) if fixed_off_str in WEEKDAYS_LIST else None
+
+        emp_obj = {
+            'name': name,
+            'pensum': pensum_val,
+            'fixed_off': fixed_off_idx
+        }
+        self._insert_employee_object(emp_obj)
+        self.ent_emp_name.delete(0, tk.END)
 
     def remove_employee(self):
         sel = self.lst_employees.curselection()
@@ -338,7 +379,7 @@ class ShiftPlannerApp:
             return
 
         idx = sel[0]
-        emp_name = self.employees[idx]
+        emp_name = self.employees[idx]['name']
 
         if messagebox.askyesno("Mitarbeiter Entfernen", f"Möchtest du '{emp_name}' wirklich entfernen?"):
             del self.employees[idx]
@@ -353,7 +394,7 @@ class ShiftPlannerApp:
             messagebox.showwarning("Hinweis", "Bitte zuerst einen Mitarbeiter in der Liste auswählen.")
             return
 
-        emp = self.employees[sel[0]]
+        emp_name = self.employees[sel[0]]['name']
         dt = self.dp_wish_date.get_date()
         wish_type = self.cmb_wish_type.get()
 
@@ -365,19 +406,18 @@ class ShiftPlannerApp:
             year, week_num, _ = dt.isocalendar()
             ho_count_in_week = sum(
                 1 for w in self.wishes 
-                if w['emp'] == emp and w['type'] == "Homeoffice" and w['date'].isocalendar()[:2] == (year, week_num)
+                if w['emp'] == emp_name and w['type'] == "Homeoffice" and w['date'].isocalendar()[:2] == (year, week_num)
             )
 
             if ho_count_in_week >= 2:
                 messagebox.showwarning(
                     "Regelung nicht erfüllt", 
-                    f"Nicht möglich!\n\nFür {emp} wurden in KW {week_num} bereits {ho_count_in_week} Homeoffice-Wunschtage erfasst.\n\n"
-                    f"Regelung: Nur max. 2 Tage Homeoffice pro Woche erlaubt."
+                    f"Nicht möglich!\n\nFür {emp_name} wurden in KW {week_num} bereits {ho_count_in_week} Homeoffice-Wunschtage erfasst."
                 )
                 return
 
-        self.wishes.append({'emp': emp, 'date': dt, 'type': wish_type})
-        messagebox.showinfo("Gespeichert", f"Wunsch für {emp} am {dt.strftime('%d/%m/%Y')} ({wish_type}) hinterlegt.")
+        self.wishes.append({'emp': emp_name, 'date': dt, 'type': wish_type})
+        messagebox.showinfo("Gespeichert", f"Wunsch für {emp_name} am {dt.strftime('%d/%m/%Y')} ({wish_type}) hinterlegt.")
 
     def add_vacation(self):
         sel = self.lst_employees.curselection()
@@ -385,7 +425,7 @@ class ShiftPlannerApp:
             messagebox.showwarning("Hinweis", "Bitte zuerst einen Mitarbeiter auswählen.")
             return
 
-        emp = self.employees[sel[0]]
+        emp_name = self.employees[sel[0]]['name']
         s_dt = self.dp_vac_start.get_date()
         e_dt = self.dp_vac_end.get_date()
 
@@ -393,8 +433,8 @@ class ShiftPlannerApp:
             messagebox.showerror("Fehler", "Gültiges Von- und Bis-Datum angeben.")
             return
 
-        self.vacations.append({'emp': emp, 'start': s_dt, 'end': e_dt})
-        messagebox.showinfo("Gespeichert", f"Ferien für {emp} vom {s_dt.strftime('%d/%m/%Y')} bis {e_dt.strftime('%d/%m/%Y')} erfasst.")
+        self.vacations.append({'emp': emp_name, 'start': s_dt, 'end': e_dt})
+        messagebox.showinfo("Gespeichert", f"Ferien für {emp_name} vom {s_dt.strftime('%d/%m/%Y')} bis {e_dt.strftime('%d/%m/%Y')} erfasst.")
 
     def reset_all(self):
         if messagebox.askyesno("Zurücksetzen", "Möchtest du wirklich alle eingegebenen Wunschtage und Ferien zurücksetzen?"):
@@ -406,8 +446,8 @@ class ShiftPlannerApp:
                 widget.destroy()
             messagebox.showinfo("Zurückgesetzt", "Alle Wunschtage und Ferien wurden erfolgreich gelöscht.")
 
-    def is_in_vacation(self, emp, d):
-        return any(v['start'] <= d <= v['end'] for v in self.vacations if v['emp'] == emp)
+    def is_in_vacation(self, emp_name, d):
+        return any(v['start'] <= d <= v['end'] for v in self.vacations if v['emp'] == emp_name)
 
     def generate_plan(self):
         if not self.employees:
@@ -433,7 +473,6 @@ class ShiftPlannerApp:
             messagebox.showinfo("Info", "Keine Arbeitstage (Mo-Fr) im gewählten Zeitraum.")
             return
 
-        # Nach Kalenderwochen gruppieren
         weeks_dict = defaultdict(list)
         for day in work_days:
             year, week_num, _ = day.isocalendar()
@@ -443,88 +482,106 @@ class ShiftPlannerApp:
         pre_vac_days = set()
         post_vac_days = set()
         for emp in self.employees:
+            e_name = emp['name']
             for idx, day in enumerate(work_days):
-                if not self.is_in_vacation(emp, day):
-                    if idx > 0 and self.is_in_vacation(emp, work_days[idx - 1]):
-                        post_vac_days.add((emp, day))
-                    if idx < len(work_days) - 1 and self.is_in_vacation(emp, work_days[idx + 1]):
-                        pre_vac_days.add((emp, day))
+                if not self.is_in_vacation(e_name, day):
+                    if idx > 0 and self.is_in_vacation(e_name, work_days[idx - 1]):
+                        post_vac_days.add((e_name, day))
+                    if idx < len(work_days) - 1 and self.is_in_vacation(e_name, work_days[idx + 1]):
+                        pre_vac_days.add((e_name, day))
 
-        plan = {emp: {} for emp in self.employees}
+        plan = {emp['name']: {} for emp in self.employees}
         unstaffed_warnings = []
-        shift_counts = {emp: {"Frühschicht": 0, "Spätschicht": 0} for emp in self.employees}
+        shift_counts = {emp['name']: {"Frühschicht": 0, "Spätschicht": 0} for emp in self.employees}
 
-        # 2. Wochenweise Berechnung mit echter Zufallslogik
+        # 2. Wochenweise Berechnung
         for (year, week_num), week_days in weeks_dict.items():
             
-            # Wöchentliches HO-Limit festlegen (1 bei Ferienübergang in dieser Woche, sonst 2)
+            # Wöchentliches HO-Limit festlegen (Pensum berücksichtigen)
             weekly_ho_max = {}
             for emp in self.employees:
-                weekly_ho_max[emp] = 2
+                e_name = emp['name']
+                # Standard-Limit basierend auf Pensum (100% -> max 2 HO-Tage, <100% -> max 1 HO-Tag)
+                base_ho_max = 2 if emp['pensum'] == 100 else 1
+
                 for day in week_days:
-                    if (emp, day) in pre_vac_days or (emp, day) in post_vac_days:
-                        weekly_ho_max[emp] = 1
+                    if (e_name, day) in pre_vac_days or (e_name, day) in post_vac_days:
+                        base_ho_max = 1
+
+                weekly_ho_max[e_name] = base_ho_max
 
             ho_weekly_count = defaultdict(int)
 
-            # Ferien eintragen
+            # Fixen Freitags-Tag (Teilzeit) & Ferien eintragen
             for day in week_days:
                 for emp in self.employees:
-                    if self.is_in_vacation(emp, day):
-                        plan[emp][day] = "Ferien"
+                    e_name = emp['name']
+                    if self.is_in_vacation(e_name, day):
+                        plan[e_name][day] = "Ferien"
+                    elif emp['fixed_off'] is not None and day.weekday() == emp['fixed_off']:
+                        plan[e_name][day] = "Teilzeit (Frei)"
 
             # A. Wunschtage vorrangig anwenden
             for day in week_days:
                 for emp in self.employees:
-                    if plan[emp].get(day) == "Ferien":
+                    e_name = emp['name']
+                    if plan[e_name].get(day) in ["Ferien", "Teilzeit (Frei)"]:
                         continue
-                    emp_wishes = [w for w in self.wishes if w['emp'] == emp and w['date'] == day]
+                    emp_wishes = [w for w in self.wishes if w['emp'] == e_name and w['date'] == day]
                     if emp_wishes:
                         w_type = emp_wishes[0]['type']
                         if w_type == "Homeoffice":
-                            if ho_weekly_count[emp] < weekly_ho_max[emp]:
-                                plan[emp][day] = "Homeoffice"
-                                ho_weekly_count[emp] += 1
+                            if ho_weekly_count[e_name] < weekly_ho_max[e_name]:
+                                plan[e_name][day] = "Homeoffice"
+                                ho_weekly_count[e_name] += 1
                         else:
-                            plan[emp][day] = w_type
-                            shift_counts[emp][w_type] += 1
+                            plan[e_name][day] = w_type
+                            shift_counts[e_name][w_type] += 1
 
             # B. Prioritäre Ferien-Übergangstage (Pre/Post WFH)
             for day in week_days:
                 for emp in self.employees:
-                    if day in plan[emp]:
+                    e_name = emp['name']
+                    if day in plan[e_name]:
                         continue
-                    if (emp, day) in pre_vac_days or (emp, day) in post_vac_days:
-                        if ho_weekly_count[emp] < weekly_ho_max[emp]:
-                            on_site_count = sum(1 for e in self.employees if plan[e].get(day) not in ["Ferien", "Homeoffice"])
+                    if (e_name, day) in pre_vac_days or (e_name, day) in post_vac_days:
+                        if ho_weekly_count[e_name] < weekly_ho_max[e_name]:
+                            on_site_count = sum(
+                                1 for e in self.employees 
+                                if plan[e['name']].get(day) not in ["Ferien", "Homeoffice", "Teilzeit (Frei)"]
+                            )
                             if on_site_count - 1 >= 2 or len(self.employees) < 3:
-                                plan[emp][day] = "Homeoffice"
-                                ho_weekly_count[emp] += 1
+                                plan[e_name][day] = "Homeoffice"
+                                ho_weekly_count[e_name] += 1
 
             # C. Automatische & Zufällige Homeoffice-Verteilung
-            # Mitarbeiterliste für diese Woche zufällig mischen (Fairness & Arbitrarietät)
             shuffled_emps = list(self.employees)
             random.shuffle(shuffled_emps)
 
             for emp in shuffled_emps:
-                while ho_weekly_count[emp] < weekly_ho_max[emp]:
+                e_name = emp['name']
+                while ho_weekly_count[e_name] < weekly_ho_max[e_name]:
                     candidate_days = []
                     for day in week_days:
-                        if day in plan[emp]: # Bereits Ferien, Wunsch oder HO
+                        if day in plan[e_name]: # Bereits Ferien, Teilzeit, Wunsch oder HO
                             continue
                         # Mindestbesetzung (mind. 2 vor Ort) prüfen
-                        on_site_count = sum(1 for e in self.employees if plan[e].get(day) not in ["Ferien", "Homeoffice"])
+                        on_site_count = sum(
+                            1 for e in self.employees 
+                            if plan[e['name']].get(day) not in ["Ferien", "Homeoffice", "Teilzeit (Frei)"]
+                        )
                         if on_site_count > 2 or len(self.employees) <= 2:
                             candidate_days.append(day)
 
                     if not candidate_days:
-                        break # Keine Tage mehr frei
+                        break
 
                     # Sonderregeln für Freitag & Mittwoch:
-                    # - Freitag (weekday 4): Wenn noch niemand am Freitag HO hat, bevorzugt am Freitag vergeben
-                    # - Mittwoch (weekday 2): Nach Möglichkeit vermeiden, um Mittwoch als vollen Präsenztag zu erlauben
                     friday_candidates = [d for d in candidate_days if d.weekday() == 4]
-                    friday_has_ho = any(plan[e].get(d) == "Homeoffice" for e in self.employees for d in week_days if d.weekday() == 4)
+                    friday_has_ho = any(
+                        plan[e['name']].get(d) == "Homeoffice" 
+                        for e in self.employees for d in week_days if d.weekday() == 4
+                    )
 
                     if friday_candidates and not friday_has_ho:
                         selected_day = random.choice(friday_candidates)
@@ -535,12 +592,15 @@ class ShiftPlannerApp:
                         else:
                             selected_day = random.choice(candidate_days)
 
-                    plan[emp][selected_day] = "Homeoffice"
-                    ho_weekly_count[emp] += 1
+                    plan[e_name][selected_day] = "Homeoffice"
+                    ho_weekly_count[e_name] += 1
 
             # D. Schichteinteilung (Früh- vs. Spätschicht) vor Ort
             for day in week_days:
-                on_site_emps = [e for e in self.employees if plan[e].get(day) not in ["Ferien", "Homeoffice"]]
+                on_site_emps = [
+                    e['name'] for e in self.employees 
+                    if plan[e['name']].get(day) not in ["Ferien", "Homeoffice", "Teilzeit (Frei)"]
+                ]
                 unassigned_on_site = [e for e in on_site_emps if day not in plan[e]]
                 
                 N = len(on_site_emps)
@@ -549,25 +609,23 @@ class ShiftPlannerApp:
                     continue
 
                 # Schichtverhältnis-Regeln:
-                # - Bei 3 Personen vor Ort: 2 Frühschicht, 1 Spätschicht
-                # - Bei 4 Personen vor Ort: 2 Frühschicht, 2 Spätschicht (50:50)
-                # Formel: (N + 1) // 2
+                # 3 Personen -> 2 Früh, 1 Spät
+                # 4 Personen -> 2 Früh, 2 Spät
                 target_frueh = (N + 1) // 2
 
                 already_frueh = sum(1 for e in on_site_emps if plan[e].get(day) == "Frühschicht")
                 needed_frueh = max(0, target_frueh - already_frueh)
 
-                # Unzugeteilte Mitarbeiter zufällig mischen und nach bisheriger Schicht-Balance gewichten
                 random.shuffle(unassigned_on_site)
                 unassigned_on_site.sort(key=lambda e: (shift_counts[e]["Frühschicht"] - shift_counts[e]["Spätschicht"], random.random()))
 
-                for idx, emp in enumerate(unassigned_on_site):
+                for idx, emp_name in enumerate(unassigned_on_site):
                     if idx < needed_frueh:
-                        plan[emp][day] = "Frühschicht"
-                        shift_counts[emp]["Frühschicht"] += 1
+                        plan[emp_name][day] = "Frühschicht"
+                        shift_counts[emp_name]["Frühschicht"] += 1
                     else:
-                        plan[emp][day] = "Spätschicht"
-                        shift_counts[emp]["Spätschicht"] += 1
+                        plan[emp_name][day] = "Spätschicht"
+                        shift_counts[emp_name]["Spätschicht"] += 1
 
         if unstaffed_warnings:
             messagebox.showwarning(
@@ -608,7 +666,7 @@ class ShiftPlannerApp:
 
             lbl_top_left = tk.Label(
                 week_frame, text="Mitarbeiter", font=("Arial", 9, "bold"), 
-                bg="#E0E0E0", width=16, height=2, bd=1, relief="solid"
+                bg="#E0E0E0", width=18, height=2, bd=1, relief="solid"
             )
             lbl_top_left.grid(row=0, column=0, sticky="nsew")
 
@@ -621,14 +679,16 @@ class ShiftPlannerApp:
                 lbl_hdr.grid(row=0, column=col_idx, sticky="nsew")
 
             for row_idx, emp in enumerate(self.employees, start=1):
+                emp_name = emp['name']
+                disp_text = f"{emp_name} ({emp['pensum']}%)"
                 lbl_name = tk.Label(
-                    week_frame, text=emp, font=("Arial", 9, "bold"), 
-                    bg="#F5F5F5", width=16, bd=1, relief="solid", anchor="w", padx=5
+                    week_frame, text=disp_text, font=("Arial", 9, "bold"), 
+                    bg="#F5F5F5", width=18, bd=1, relief="solid", anchor="w", padx=5
                 )
                 lbl_name.grid(row=row_idx, column=0, sticky="nsew")
 
                 for col_idx, d in enumerate(days, start=1):
-                    val = plan[emp].get(d, "-")
+                    val = plan[emp_name].get(d, "-")
                     cfg = COLOR_CONFIG.get(val, {"bg": "#FFFFFF", "fg": "#000000"})
 
                     lbl_cell = tk.Label(
@@ -732,9 +792,10 @@ class ShiftPlannerApp:
                 ]
 
                 for row_idx, emp in enumerate(self.employees, start=1):
-                    row = [Paragraph(f"<b>{emp}</b>", cell_style)]
+                    emp_name = emp['name']
+                    row = [Paragraph(f"<b>{emp_name} ({emp['pensum']}%)</b>", cell_style)]
                     for col_idx, d in enumerate(days, start=1):
-                        val = self.last_plan[emp].get(d, "-")
+                        val = self.last_plan[emp_name].get(d, "-")
                         cfg = COLOR_CONFIG.get(val, {"bg": "#FFFFFF", "fg": "#000000"})
                         
                         row.append(Paragraph(val, cell_style))
@@ -743,7 +804,7 @@ class ShiftPlannerApp:
 
                     table_data.append(row)
 
-                col_widths = [100] + [80] * len(days)
+                col_widths = [110] + [80] * len(days)
                 t = Table(table_data, colWidths=col_widths)
                 t.setStyle(TableStyle(table_styles))
                 elements.append(t)

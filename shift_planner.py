@@ -1,8 +1,19 @@
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 from datetime import datetime, timedelta, date
 import calendar
 from collections import defaultdict
+
+# PDF Export via ReportLab
+try:
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.lib import colors
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    REPORTLAB_AVAILABLE = True
+except ImportError:
+    REPORTLAB_AVAILABLE = False
+
 
 # --- FARBLEGENDE (Pastelltöne) ---
 COLOR_CONFIG = {
@@ -171,12 +182,16 @@ class CalendarDatePicker(ttk.Frame):
 class ShiftPlannerApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Arbeitsplan Generator mit intelligenter HO-Verteilung")
-        self.root.geometry("1200x820")
+        self.root.title("Arbeitsplan Generator mit HO-Verteilung & PDF Export")
+        self.root.geometry("1240x840")
 
         self.employees = []
         self.wishes = []      # {'emp': str, 'date': date, 'type': str}
         self.vacations = []   # {'emp': str, 'start': date, 'end': date}
+
+        # Zustand für PDF-Export speichern
+        self.last_weeks_dict = None
+        self.last_plan = None
 
         self._build_ui()
 
@@ -200,8 +215,15 @@ class ShiftPlannerApp:
 
         self.ent_emp_name = ttk.Entry(emp_frame, width=15)
         self.ent_emp_name.pack(side="top", anchor="w", padx=2, pady=2)
-        btn_add_emp = ttk.Button(emp_frame, text="Mitarbeiter Hinzufügen", command=self.add_employee)
-        btn_add_emp.pack(side="top", anchor="w", padx=2, pady=2)
+
+        emp_btn_subframe = tk.Frame(emp_frame)
+        emp_btn_subframe.pack(side="top", fill="x", pady=2)
+
+        btn_add_emp = ttk.Button(emp_btn_subframe, text="+ Hinzufügen", command=self.add_employee)
+        btn_add_emp.pack(side="left", padx=(0, 2))
+
+        btn_rem_emp = ttk.Button(emp_btn_subframe, text="- Entfernen", command=self.remove_employee)
+        btn_rem_emp.pack(side="left")
 
         self.lst_employees = tk.Listbox(emp_frame, height=4, width=22)
         self.lst_employees.pack(side="bottom", fill="both", expand=True, pady=2)
@@ -242,7 +264,7 @@ class ShiftPlannerApp:
         btn_add_vac = ttk.Button(vac_frame, text="Ferien speichern", command=self.add_vacation)
         btn_add_vac.grid(row=2, column=0, columnspan=2, pady=6)
 
-        # Aktions-Buttons (Generieren & Reset)
+        # Aktions-Buttons (Generieren, PDF Export & Reset)
         btn_frame = tk.Frame(self.root)
         btn_frame.pack(fill="x", padx=10, pady=5)
 
@@ -251,17 +273,27 @@ class ShiftPlannerApp:
             text="Arbeitsplan Generieren", 
             bg="#2b5c8f", 
             fg="white", 
-            font=("Arial", 11, "bold"), 
+            font=("Arial", 10, "bold"), 
             command=self.generate_plan
         )
         btn_generate.pack(side="left", fill="x", expand=True, padx=(0, 5))
+
+        btn_pdf = tk.Button(
+            btn_frame, 
+            text="Export to PDF", 
+            bg="#27AE60", 
+            fg="white", 
+            font=("Arial", 10, "bold"), 
+            command=self.export_pdf
+        )
+        btn_pdf.pack(side="left", padx=5)
 
         btn_reset = tk.Button(
             btn_frame, 
             text="Alles Zurücksetzen", 
             bg="#C0392B", 
             fg="white", 
-            font=("Arial", 11, "bold"), 
+            font=("Arial", 10, "bold"), 
             command=self.reset_all
         )
         btn_reset.pack(side="right", padx=(5, 0))
@@ -298,6 +330,24 @@ class ShiftPlannerApp:
             self.employees.append(name)
             self.lst_employees.insert(tk.END, name)
             self.ent_emp_name.delete(0, tk.END)
+
+    def remove_employee(self):
+        """Entfernt den in der Listbox ausgewählten Mitarbeiter"""
+        sel = self.lst_employees.curselection()
+        if not sel:
+            messagebox.showwarning("Hinweis", "Bitte zuerst einen Mitarbeiter in der Liste auswählen.")
+            return
+
+        idx = sel[0]
+        emp_name = self.employees[idx]
+
+        if messagebox.askyesno("Mitarbeiter Entfernen", f"Möchtest du '{emp_name}' wirklich entfernen?"):
+            del self.employees[idx]
+            self.lst_employees.delete(idx)
+            # Entferne auch zugehörige Wünsche und Ferien
+            self.wishes = [w for w in self.wishes if w['emp'] != emp_name]
+            self.vacations = [v for v in self.vacations if v['emp'] != emp_name]
+            messagebox.showinfo("Entfernt", f"Mitarbeiter '{emp_name}' wurde gelöscht.")
 
     def add_wish(self):
         sel = self.lst_employees.curselection()
@@ -349,10 +399,12 @@ class ShiftPlannerApp:
         messagebox.showinfo("Gespeichert", f"Ferien für {emp} vom {s_dt.strftime('%d/%m/%Y')} bis {e_dt.strftime('%d/%m/%Y')} erfasst.")
 
     def reset_all(self):
-        """Löscht alle erfassten Wünsche und Ferien"""
+        """Löscht alle erfassten Wünsche, Ferien und generierten Ergebnisse"""
         if messagebox.askyesno("Zurücksetzen", "Möchtest du wirklich alle eingegebenen Wunschtage und Ferien zurücksetzen?"):
             self.wishes.clear()
             self.vacations.clear()
+            self.last_weeks_dict = None
+            self.last_plan = None
             for widget in self.result_container.winfo_children():
                 widget.destroy()
             messagebox.showinfo("Zurückgesetzt", "Alle Wunschtage und Ferien wurden erfolgreich gelöscht.")
@@ -396,7 +448,7 @@ class ShiftPlannerApp:
                     if idx < len(work_days) - 1 and self.is_in_vacation(emp, work_days[idx + 1]):
                         pre_vac_days.add((emp, day))
 
-        # Max HO Limit pro Woche ermitteln (Standard: 2, bei Ferienübergang in dieser Woche: 1)
+        # Max HO Limit pro Woche ermitteln
         weekly_ho_max = {}
         for day in work_days:
             y, w, _ = day.isocalendar()
@@ -405,7 +457,7 @@ class ShiftPlannerApp:
                 if (emp, week_key) not in weekly_ho_max:
                     weekly_ho_max[(emp, week_key)] = 2
                 if (emp, day) in pre_vac_days or (emp, day) in post_vac_days:
-                    weekly_ho_max[(emp, week_key)] = 1  # Wegen Ferien-HO darf kein weiteres HO vergeben werden
+                    weekly_ho_max[(emp, week_key)] = 1
 
         plan = {emp: {} for emp in self.employees}
         ho_weekly_count = defaultdict(lambda: defaultdict(int))
@@ -450,13 +502,12 @@ class ShiftPlannerApp:
             for emp in list(available_emps):
                 if (emp, day) in pre_vac_days or (emp, day) in post_vac_days:
                     if ho_weekly_count[emp][week_key] < weekly_ho_max[(emp, week_key)]:
-                        # Prüfen, ob noch genügend Mitarbeiter für Schichten übrig bleiben
                         if len(available_emps) - 1 >= 2 or (len(self.employees) < 3):
                             assigned_today[emp] = "Homeoffice"
                             ho_weekly_count[emp][week_key] += 1
                             available_emps.remove(emp)
 
-            # D. Mindestbesetzung garantieren (1x Frühschicht, 1x Spätschicht)
+            # D. Mindestbesetzung garantieren
             has_frueh = any(val == "Frühschicht" for val in assigned_today.values())
             has_spaet = any(val == "Spätschicht" for val in assigned_today.values())
 
@@ -477,19 +528,17 @@ class ShiftPlannerApp:
             if not has_frueh or not has_spaet:
                 unstaffed_warnings.append(day.strftime("%d/%m/%Y"))
 
-            # E. Automatische & faire Verteilung verbleibender Homeofficetage
-            # Sortiere nach wer aktuell am wenigsten HO in der Woche hat
+            # E. Automatische faire HO-Verteilung
             available_emps.sort(key=lambda e: ho_weekly_count[e][week_key])
 
             for emp in list(available_emps):
                 max_allowed = weekly_ho_max[(emp, week_key)]
                 if ho_weekly_count[emp][week_key] < max_allowed:
-                    # Mindestbesetzung für verbleibende Personen wahren
                     assigned_today[emp] = "Homeoffice"
                     ho_weekly_count[emp][week_key] += 1
                     available_emps.remove(emp)
 
-            # F. Restliche Mitarbeiter auf Früh- und Spätschicht aufteilen
+            # F. Restliche Mitarbeiter auf Schichten aufteilen
             for emp in available_emps:
                 chosen = "Frühschicht" if shift_counts[emp]["Frühschicht"] <= shift_counts[emp]["Spätschicht"] else "Spätschicht"
                 assigned_today[emp] = chosen
@@ -505,6 +554,8 @@ class ShiftPlannerApp:
                 ", ".join(unstaffed_warnings)
             )
 
+        self.last_weeks_dict = weeks_dict
+        self.last_plan = plan
         self.render_matrix(weeks_dict, plan)
 
     def render_matrix(self, weeks_dict, plan):
@@ -570,6 +621,125 @@ class ShiftPlannerApp:
                         relief="solid"
                     )
                     lbl_cell.grid(row=row_idx, column=col_idx, sticky="nsew")
+
+    def export_pdf(self):
+        """Exportiert den aktuell generierten Plan als PDF-Datei"""
+        if not REPORTLAB_AVAILABLE:
+            messagebox.showerror(
+                "Modul fehlt", 
+                "Für den PDF-Export wird die Python-Bibliothek 'reportlab' benötigt.\n\n"
+                "Bitte installiere sie über das Terminal/Konsole mit:\npip install reportlab"
+            )
+            return
+
+        if not self.last_plan or not self.last_weeks_dict:
+            messagebox.showwarning("Hinweis", "Bitte zuerst einen Arbeitsplan generieren.")
+            return
+
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".pdf",
+            filetypes=[("PDF Datei", "*.pdf")],
+            title="Arbeitsplan als PDF speichern"
+        )
+
+        if not file_path:
+            return
+
+        try:
+            doc = SimpleDocTemplate(
+                file_path, 
+                pagesize=landscape(A4),
+                rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30
+            )
+
+            styles = getSampleStyleSheet()
+            title_style = ParagraphStyle(
+                'DocTitle',
+                parent=styles['Heading1'],
+                fontSize=18,
+                leading=22,
+                textColor=colors.HexColor("#2B5C8F"),
+                spaceAfter=15
+            )
+            week_heading_style = ParagraphStyle(
+                'WeekTitle',
+                parent=styles['Heading2'],
+                fontSize=12,
+                leading=16,
+                textColor=colors.HexColor("#333333"),
+                spaceBefore=10,
+                spaceAfter=5
+            )
+            cell_style = ParagraphStyle(
+                'CellText',
+                parent=styles['Normal'],
+                fontSize=8,
+                leading=10,
+                alignment=1 # Center
+            )
+            hdr_cell_style = ParagraphStyle(
+                'HdrCellText',
+                parent=styles['Normal'],
+                fontSize=8,
+                leading=10,
+                alignment=1,
+                fontName="Helvetica-Bold"
+            )
+
+            elements = []
+            elements.append(Paragraph("Arbeitsplan & Schichteinteilung", title_style))
+
+            weekday_names = ["Mo", "Di", "Mi", "Do", "Fr"]
+
+            for (year, week_num), days in self.last_weeks_dict.items():
+                week_str = f"Kalenderwoche {week_num} ({days[0].strftime('%d.%m.%Y')} bis {days[-1].strftime('%d.%m.%Y')})"
+                elements.append(Paragraph(week_str, week_heading_style))
+
+                # Tabelle aufbauen
+                table_data = []
+
+                # Header Zeile
+                header_row = [Paragraph("<b>Mitarbeiter</b>", hdr_cell_style)]
+                for d in days:
+                    hdr_text = f"<b>{weekday_names[d.weekday()]}</b><br/>{d.strftime('%d/%m')}"
+                    header_row.append(Paragraph(hdr_text, hdr_cell_style))
+                table_data.append(header_row)
+
+                # Daten Zeilen
+                table_styles = [
+                    ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#E0E0E0")),
+                    ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                    ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+                    ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#B0B0B0")),
+                    ('INNERGRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#D0D0D0")),
+                ]
+
+                for row_idx, emp in enumerate(self.employees, start=1):
+                    row = [Paragraph(f"<b>{emp}</b>", cell_style)]
+                    for col_idx, d in enumerate(days, start=1):
+                        val = self.last_plan[emp].get(d, "-")
+                        cfg = COLOR_CONFIG.get(val, {"bg": "#FFFFFF", "fg": "#000000"})
+                        
+                        row.append(Paragraph(val, cell_style))
+                        
+                        # Zellhintergrundfarbe anwenden
+                        bg_hex = cfg["bg"]
+                        table_styles.append(('BACKGROUND', (col_idx, row_idx), (col_idx, row_idx), colors.HexColor(bg_hex)))
+
+                    table_data.append(row)
+
+                # Spaltenbreiten berechnen
+                col_widths = [100] + [80] * len(days)
+                t = Table(table_data, colWidths=col_widths)
+                t.setStyle(TableStyle(table_styles))
+                elements.append(t)
+                elements.append(Spacer(1, 15))
+
+            doc.build(elements)
+            messagebox.showinfo("PDF Export", f"Der Arbeitsplan wurde erfolgreich unter:\n{file_path}\ngespeichert.")
+
+        except Exception as e:
+            messagebox.showerror("Fehler beim PDF Export", f"Export fehlgeschlagen:\n{str(e)}")
 
 
 if __name__ == "__main__":

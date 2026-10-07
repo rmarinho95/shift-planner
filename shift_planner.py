@@ -21,7 +21,7 @@ COLOR_CONFIG = {
     "Frühschicht":     {"bg": "#D4EDDA", "fg": "#155724", "desc": "Frühschicht (07:30 - 16:30)"},
     "Spätschicht":     {"bg": "#A8E6CF", "fg": "#0B5345", "desc": "Spätschicht (08:30 - 17:30)"},
     "Homeoffice":      {"bg": "#D0E8FF", "fg": "#0C5460", "desc": "Homeoffice"},
-    "Teilzeit (Frei)": {"bg": "#E2E3E5", "fg": "#383D41", "desc": "Teilzeit / Fixer Freitag"},
+    "Teilzeit (Frei)": {"bg": "#E2E3E5", "fg": "#383D41", "desc": "Teilzeit / Freier Tag"},
     "Ferien":          {"bg": "#E2E3E5", "fg": "#383D41", "desc": "Ferien"},
     "Unterbesetzt":    {"bg": "#F8D7DA", "fg": "#721C24", "desc": "Fehlende Besetzung!"}
 }
@@ -225,7 +225,7 @@ class ShiftPlannerApp:
         self.cmb_pensum.grid(row=1, column=1, padx=2, pady=2, sticky="w")
         self.cmb_pensum.current(0)
 
-        ttk.Label(emp_frame, text="Fixer Freitag:").grid(row=2, column=0, sticky="w")
+        ttk.Label(emp_frame, text="Fixer freier Tag:").grid(row=2, column=0, sticky="w")
         self.cmb_fixed_off = ttk.Combobox(emp_frame, values=["Keiner"] + WEEKDAYS_LIST, width=13, state="readonly")
         self.cmb_fixed_off.grid(row=2, column=1, padx=2, pady=2, sticky="w")
         self.cmb_fixed_off.current(0)
@@ -336,9 +336,9 @@ class ShiftPlannerApp:
         # Beispieldaten erzeugen
         sample_data = [
             {'name': 'Anna',  'pensum': 100, 'fixed_off': None},
-            {'name': 'Ben',   'pensum': 80,  'fixed_off': 2},  # Mi frei
-            {'name': 'Clara', 'pensum': 100, 'fixed_off': None},
-            {'name': 'David', 'pensum': 80,  'fixed_off': 4}   # Fr frei
+            {'name': 'Ben',   'pensum': 80,  'fixed_off': 2},    # Fixer Mittwoch
+            {'name': 'Clara', 'pensum': 80,  'fixed_off': None}, # 80% (Zufälliger freier Tag)
+            {'name': 'David', 'pensum': 100, 'fixed_off': None}
         ]
         for emp in sample_data:
             self._insert_employee_object(emp)
@@ -501,7 +501,6 @@ class ShiftPlannerApp:
             weekly_ho_max = {}
             for emp in self.employees:
                 e_name = emp['name']
-                # Standard-Limit basierend auf Pensum (100% -> max 2 HO-Tage, <100% -> max 1 HO-Tag)
                 base_ho_max = 2 if emp['pensum'] == 100 else 1
 
                 for day in week_days:
@@ -512,16 +511,44 @@ class ShiftPlannerApp:
 
             ho_weekly_count = defaultdict(int)
 
-            # Fixen Freitags-Tag (Teilzeit) & Ferien eintragen
+            # A. Ferien eintragen
             for day in week_days:
                 for emp in self.employees:
                     e_name = emp['name']
                     if self.is_in_vacation(e_name, day):
                         plan[e_name][day] = "Ferien"
-                    elif emp['fixed_off'] is not None and day.weekday() == emp['fixed_off']:
+
+            # B. Fixen Freitags-Tag (Teilzeit) eintragen
+            for day in week_days:
+                for emp in self.employees:
+                    e_name = emp['name']
+                    if day not in plan[e_name] and emp['fixed_off'] is not None and day.weekday() == emp['fixed_off']:
                         plan[e_name][day] = "Teilzeit (Frei)"
 
-            # A. Wunschtage vorrangig anwenden
+            # C. Zufällige freie Tage für Teilzeitkräfte (<100%) ohne fixen freien Tag zuweisen
+            for emp in self.employees:
+                e_name = emp['name']
+                if emp['pensum'] < 100:
+                    # Wie viele freie Tage pro Woche stehen der Person zu? (80% -> 1 Tag, 60% -> 2 Tage)
+                    target_off_days = (100 - emp['pensum']) // 20
+                    
+                    # Wie viele freie Tage sind bereits eingetragen (z.B. fixer Tag oder Ferien)?
+                    existing_off_count = sum(
+                        1 for d in week_days 
+                        if plan[e_name].get(d) in ["Teilzeit (Frei)", "Ferien"]
+                    )
+                    
+                    needed_random_off = target_off_days - existing_off_count
+
+                    if needed_random_off > 0:
+                        # Freie Tage zur Auswahl (Tage, die noch nicht verplant sind)
+                        candidate_days = [d for d in week_days if d not in plan[e_name]]
+                        if len(candidate_days) >= needed_random_off:
+                            selected_off_days = random.sample(candidate_days, needed_random_off)
+                            for off_day in selected_off_days:
+                                plan[e_name][off_day] = "Teilzeit (Frei)"
+
+            # D. Wunschtage anwenden
             for day in week_days:
                 for emp in self.employees:
                     e_name = emp['name']
@@ -538,7 +565,7 @@ class ShiftPlannerApp:
                             plan[e_name][day] = w_type
                             shift_counts[e_name][w_type] += 1
 
-            # B. Prioritäre Ferien-Übergangstage (Pre/Post WFH)
+            # E. Prioritäre Ferien-Übergangstage (Pre/Post WFH)
             for day in week_days:
                 for emp in self.employees:
                     e_name = emp['name']
@@ -554,7 +581,7 @@ class ShiftPlannerApp:
                                 plan[e_name][day] = "Homeoffice"
                                 ho_weekly_count[e_name] += 1
 
-            # C. Automatische & Zufällige Homeoffice-Verteilung
+            # F. Automatische & Zufällige Homeoffice-Verteilung
             shuffled_emps = list(self.employees)
             random.shuffle(shuffled_emps)
 
@@ -576,7 +603,6 @@ class ShiftPlannerApp:
                     if not candidate_days:
                         break
 
-                    # Sonderregeln für Freitag & Mittwoch:
                     friday_candidates = [d for d in candidate_days if d.weekday() == 4]
                     friday_has_ho = any(
                         plan[e['name']].get(d) == "Homeoffice" 
@@ -595,7 +621,7 @@ class ShiftPlannerApp:
                     plan[e_name][selected_day] = "Homeoffice"
                     ho_weekly_count[e_name] += 1
 
-            # D. Schichteinteilung (Früh- vs. Spätschicht) vor Ort
+            # G. Schichteinteilung (Früh- vs. Spätschicht) vor Ort
             for day in week_days:
                 on_site_emps = [
                     e['name'] for e in self.employees 
@@ -608,9 +634,7 @@ class ShiftPlannerApp:
                     unstaffed_warnings.append(day.strftime("%d/%m/%Y"))
                     continue
 
-                # Schichtverhältnis-Regeln:
-                # 3 Personen -> 2 Früh, 1 Spät
-                # 4 Personen -> 2 Früh, 2 Spät
+                # Schichtverhältnis-Regeln: 3 Pers -> 2 Früh/1 Spät | 4 Pers -> 2 Früh/2 Spät
                 target_frueh = (N + 1) // 2
 
                 already_frueh = sum(1 for e in on_site_emps if plan[e].get(day) == "Frühschicht")

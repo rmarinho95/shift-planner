@@ -2,6 +2,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import datetime, timedelta, date
 import calendar
+from collections import defaultdict
 
 # --- FARBLEGENDE (Pastelltöne) ---
 COLOR_CONFIG = {
@@ -14,7 +15,7 @@ COLOR_CONFIG = {
 
 
 class CalendarDatePicker(ttk.Frame):
-    """Dropdown-Minikalender Widget analog Excel / Windows Kalender-Popup"""
+    """Dropdown-Minikalender Widget mit roter Hervorhebung für das heutige Datum"""
     def __init__(self, parent, initial_date=None, **kwargs):
         super().__init__(parent, **kwargs)
         self.selected_date = initial_date or date.today()
@@ -50,7 +51,7 @@ class CalendarDatePicker(ttk.Frame):
         self.view_year = current_dt.year
         self.view_month = current_dt.month
 
-        # TopLevel-Fenster ohne Rahmen für echten Dropdown-Look
+        # TopLevel-Fenster ohne Rahmen für Dropdown-Look
         self.popup = tk.Toplevel(self)
         self.popup.wm_overrideredirect(True)
         self.popup.attributes("-topmost", True)
@@ -97,12 +98,31 @@ class CalendarDatePicker(ttk.Frame):
         # Tage-Raster
         cal = calendar.Calendar(firstweekday=0)
         month_days = cal.monthdatescalendar(self.view_year, self.view_month)
+        today = date.today()
 
         for row_idx, week in enumerate(month_days, start=1):
             for col_idx, day_dt in enumerate(week):
                 is_curr_month = (day_dt.month == self.view_month)
-                fg_color = "#000000" if is_curr_month else "#B0B0B0"
-                bg_color = "#D0E8FF" if day_dt == self.get_date() else "#FFFFFF"
+                is_today = (day_dt == today)
+                is_selected = (day_dt == self.get_date())
+
+                # ROTE MARKIERUNG FÜR HEUTE
+                if is_today:
+                    fg_color = "#D9534F"  # Roter Text
+                    font_style = ("Arial", 8, "bold")
+                elif is_curr_month:
+                    fg_color = "#000000"
+                    font_style = ("Arial", 8)
+                else:
+                    fg_color = "#B0B0B0"
+                    font_style = ("Arial", 8)
+
+                if is_selected:
+                    bg_color = "#D0E8FF"  # Blau markiert für gewähltes Datum
+                elif is_today:
+                    bg_color = "#FFE6E6"  # Hellroter Hintergund für Heute
+                else:
+                    bg_color = "#FFFFFF"
 
                 btn_day = tk.Button(
                     grid_frame,
@@ -110,21 +130,21 @@ class CalendarDatePicker(ttk.Frame):
                     bg=bg_color,
                     fg=fg_color,
                     bd=1,
-                    relief="flat",
+                    relief="solid" if is_today else "flat",
                     width=3,
-                    font=("Arial", 8),
+                    font=font_style,
                     command=lambda d=day_dt: self.select_day(d)
                 )
                 btn_day.grid(row=row_idx, column=col_idx, padx=1, pady=1)
 
-        # Fusszeile "Heute" (wie im Bild)
-        today = date.today()
+        # Fusszeile "Heute"
         btn_today = tk.Button(
             inner_frame,
             text=f"Heute: {today.strftime('%d.%m.%Y')}",
-            bg="#F8F8F8",
+            bg="#FFE6E6",
+            fg="#D9534F",
             bd=0,
-            font=("Arial", 8, "underline"),
+            font=("Arial", 8, "bold", "underline"),
             command=lambda: self.select_day(today)
         )
         btn_today.pack(fill="x", pady=(2, 2))
@@ -155,8 +175,8 @@ class CalendarDatePicker(ttk.Frame):
 class ShiftPlannerApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Arbeitsplan Generator mit Schichtprüfungen")
-        self.root.geometry("1200x750")
+        self.root.title("Arbeitsplan Generator mit Wochen-Matrix")
+        self.root.geometry("1200x800")
 
         self.employees = []
         self.wishes = []      # {'emp': str, 'date': date, 'type': str}
@@ -175,7 +195,7 @@ class ShiftPlannerApp:
         self.dp_start.grid(row=0, column=1, padx=5, pady=2, sticky="w")
 
         ttk.Label(control_frame, text="Enddatum:").grid(row=0, column=2, sticky="w", padx=5)
-        self.dp_end = CalendarDatePicker(control_frame, date.today() + timedelta(days=12))
+        self.dp_end = CalendarDatePicker(control_frame, date.today() + timedelta(days=18))
         self.dp_end.grid(row=0, column=3, padx=5, pady=2, sticky="w")
 
         # 2. Mitarbeiter
@@ -255,7 +275,7 @@ class ShiftPlannerApp:
             lbl.pack(side="left", padx=4)
 
         # Ergebnismatrix Container
-        self.result_container = ttk.LabelFrame(self.root, text="Arbeitsplan Matrix", padding=5)
+        self.result_container = ttk.LabelFrame(self.root, text="Arbeitsplan Matrix (Wochenübersicht)", padding=5)
         self.result_container.pack(fill="both", expand=True, padx=10, pady=5)
 
         # Beispieldaten vorausfüllen
@@ -284,11 +304,8 @@ class ShiftPlannerApp:
             messagebox.showerror("Fehler", "Ungültiges Datum.")
             return
 
-        # PRÜFUNG: Maximal 2 Tage Homeoffice pro Kalenderwoche
         if wish_type == "Homeoffice":
             year, week_num, _ = dt.isocalendar()
-            
-            # Bereits erfasste HO-Wünsche dieser Person in dieser Woche zählen
             ho_count_in_week = sum(
                 1 for w in self.wishes 
                 if w['emp'] == emp and w['type'] == "Homeoffice" and w['date'].isocalendar()[:2] == (year, week_num)
@@ -315,12 +332,8 @@ class ShiftPlannerApp:
         s_dt = self.dp_vac_start.get_date()
         e_dt = self.dp_vac_end.get_date()
 
-        if not s_dt or not e_dt:
+        if not s_dt or not e_dt or e_dt < s_dt:
             messagebox.showerror("Fehler", "Gültiges Von- und Bis-Datum angeben.")
-            return
-
-        if e_dt < s_dt:
-            messagebox.showerror("Fehler", "Enddatum muss nach Startdatum liegen.")
             return
 
         self.vacations.append({'emp': emp, 'start': s_dt, 'end': e_dt})
@@ -338,7 +351,6 @@ class ShiftPlannerApp:
             messagebox.showerror("Fehler", "Gültigen Zeitraum wählen.")
             return
 
-        # Arbeitstage ermitteln (Montag bis Freitag)
         work_days = []
         curr = start_date
         while curr <= end_date:
@@ -355,14 +367,16 @@ class ShiftPlannerApp:
         shift_counts = {emp: {"Frühschicht": 0, "Spätschicht": 0} for emp in self.employees}
         unstaffed_warnings = []
 
-        # Tagesweise Einteilung mit Besetzungsprüfung
+        # Nach Kalenderwochen gruppieren
+        weeks_dict = defaultdict(list)
+
         for day in work_days:
             year, week_num, _ = day.isocalendar()
             week_key = f"{year}-W{week_num}"
+            weeks_dict[(year, week_num)].append(day)
 
             available_emps = []
 
-            # 1. Ferien filtern
             for emp in self.employees:
                 on_vac = any(v['start'] <= day <= v['end'] for v in self.vacations if v['emp'] == emp)
                 if on_vac:
@@ -372,7 +386,6 @@ class ShiftPlannerApp:
 
             assigned_today = {}
 
-            # 2. Wunschtage verarbeiten
             for emp in list(available_emps):
                 emp_wishes = [w for w in self.wishes if w['emp'] == emp and w['date'] == day]
                 if emp_wishes:
@@ -387,38 +400,28 @@ class ShiftPlannerApp:
                         shift_counts[emp][w_type] += 1
                         available_emps.remove(emp)
 
-            # 3. Mindestbesetzung garantieren (Frühschicht & Spätschicht)
             has_frueh = any(val == "Frühschicht" for val in assigned_today.values())
             has_spaet = any(val == "Spätschicht" for val in assigned_today.values())
 
-            # A. Frühschicht sichern
             if not has_frueh and available_emps:
-                # Wähle Person mit den wenigsten Frühschichten
                 best_emp = min(available_emps, key=lambda e: shift_counts[e]["Frühschicht"])
                 assigned_today[best_emp] = "Frühschicht"
                 shift_counts[best_emp]["Frühschicht"] += 1
                 available_emps.remove(best_emp)
                 has_frueh = True
 
-            # B. Spätschicht sichern
             if not has_spaet and available_emps:
-                # Wähle Person mit den wenigsten Spätschichten
                 best_emp = min(available_emps, key=lambda e: shift_counts[e]["Spätschicht"])
                 assigned_today[best_emp] = "Spätschicht"
                 shift_counts[best_emp]["Spätschicht"] += 1
                 available_emps.remove(best_emp)
                 has_spaet = True
 
-            # Warnung sammeln, falls Besetzung mangels Personal unmöglich ist
             if not has_frueh or not has_spaet:
                 unstaffed_warnings.append(day.strftime("%d/%m/%Y"))
 
-            # 4. Restliche Mitarbeiter fair aufschlüsseln
             for emp in available_emps:
-                if shift_counts[emp]["Frühschicht"] <= shift_counts[emp]["Spätschicht"]:
-                    chosen = "Frühschicht"
-                else:
-                    chosen = "Spätschicht"
+                chosen = "Frühschicht" if shift_counts[emp]["Frühschicht"] <= shift_counts[emp]["Spätschicht"] else "Spätschicht"
                 assigned_today[emp] = chosen
                 shift_counts[emp][chosen] += 1
 
@@ -428,18 +431,16 @@ class ShiftPlannerApp:
         if unstaffed_warnings:
             messagebox.showwarning(
                 "Besetzungswarnung", 
-                f"An folgenden Tagen konnte mangels verfügbarem Personal die Früh- oder Spätschicht nicht besetzt werden:\n\n" + 
+                f"An folgenden Tagen konnte die Mindestbesetzung (Früh-/Spätschicht) nicht abgedeckt werden:\n\n" + 
                 ", ".join(unstaffed_warnings)
             )
 
-        self.render_matrix(work_days, plan)
+        self.render_matrix(weeks_dict, plan)
 
-    def render_matrix(self, work_days, plan):
-        # Container leeren
+    def render_matrix(self, weeks_dict, plan):
         for widget in self.result_container.winfo_children():
             widget.destroy()
 
-        # Scrollbare Canvas-Matrix für Farbzellen
         canvas = tk.Canvas(self.result_container, bg="#FFFFFF")
         scrollbar_y = ttk.Scrollbar(self.result_container, orient="vertical", command=canvas.yview)
         scrollbar_x = ttk.Scrollbar(self.result_container, orient="horizontal", command=canvas.xview)
@@ -456,48 +457,52 @@ class ShiftPlannerApp:
 
         weekday_names = ["Mo", "Di", "Mi", "Do", "Fr"]
 
-        # 1. Header-Zeile (Mitarbeiter + Daten)
-        lbl_top_left = tk.Label(
-            scroll_frame, text="Mitarbeiter", font=("Arial", 9, "bold"), 
-            bg="#E0E0E0", width=16, height=2, bd=1, relief="solid"
-        )
-        lbl_top_left.grid(row=0, column=0, sticky="nsew")
+        # WOCHENWEISE MATRIZEN RENDERN
+        for (year, week_num), days in weeks_dict.items():
+            week_title = f" Kalenderwoche {week_num} ({days[0].strftime('%d.%m.%Y')} bis {days[-1].strftime('%d.%m.%Y')}) "
+            
+            week_frame = ttk.LabelFrame(scroll_frame, text=week_title, padding=8)
+            week_frame.pack(fill="x", expand=True, padx=10, pady=10)
 
-        for col_idx, d in enumerate(work_days, start=1):
-            col_text = f"{weekday_names[d.weekday()]}\n{d.strftime('%d/%m')}"
-            lbl_hdr = tk.Label(
-                scroll_frame, text=col_text, font=("Arial", 8, "bold"), 
-                bg="#E0E0E0", width=12, height=2, bd=1, relief="solid"
+            # Header-Zeile (Mitarbeiter + Mo bis Fr)
+            lbl_top_left = tk.Label(
+                week_frame, text="Mitarbeiter", font=("Arial", 9, "bold"), 
+                bg="#E0E0E0", width=16, height=2, bd=1, relief="solid"
             )
-            lbl_hdr.grid(row=0, column=col_idx, sticky="nsew")
+            lbl_top_left.grid(row=0, column=0, sticky="nsew")
 
-        # 2. Datenzeilen mit farbigen Feldern
-        for row_idx, emp in enumerate(self.employees, start=1):
-            # Namensspalte
-            lbl_name = tk.Label(
-                scroll_frame, text=emp, font=("Arial", 9, "bold"), 
-                bg="#F5F5F5", width=16, bd=1, relief="solid", anchor="w", padx=5
-            )
-            lbl_name.grid(row=row_idx, column=0, sticky="nsew")
-
-            for col_idx, d in enumerate(work_days, start=1):
-                val = plan[emp].get(d, "-")
-                
-                # Farbkonfiguration abrufen
-                cfg = COLOR_CONFIG.get(val, {"bg": "#FFFFFF", "fg": "#000000"})
-
-                lbl_cell = tk.Label(
-                    scroll_frame,
-                    text=val,
-                    font=("Arial", 8, "bold"),
-                    bg=cfg["bg"],
-                    fg=cfg["fg"],
-                    width=12,
-                    height=2,
-                    bd=1,
-                    relief="solid"
+            for col_idx, d in enumerate(days, start=1):
+                col_text = f"{weekday_names[d.weekday()]}\n{d.strftime('%d/%m')}"
+                lbl_hdr = tk.Label(
+                    week_frame, text=col_text, font=("Arial", 8, "bold"), 
+                    bg="#E0E0E0", width=14, height=2, bd=1, relief="solid"
                 )
-                lbl_cell.grid(row=row_idx, column=col_idx, sticky="nsew")
+                lbl_hdr.grid(row=0, column=col_idx, sticky="nsew")
+
+            # Zeilen pro Mitarbeiter für diese spezifische Woche
+            for row_idx, emp in enumerate(self.employees, start=1):
+                lbl_name = tk.Label(
+                    week_frame, text=emp, font=("Arial", 9, "bold"), 
+                    bg="#F5F5F5", width=16, bd=1, relief="solid", anchor="w", padx=5
+                )
+                lbl_name.grid(row=row_idx, column=0, sticky="nsew")
+
+                for col_idx, d in enumerate(days, start=1):
+                    val = plan[emp].get(d, "-")
+                    cfg = COLOR_CONFIG.get(val, {"bg": "#FFFFFF", "fg": "#000000"})
+
+                    lbl_cell = tk.Label(
+                        week_frame,
+                        text=val,
+                        font=("Arial", 8, "bold"),
+                        bg=cfg["bg"],
+                        fg=cfg["fg"],
+                        width=14,
+                        height=2,
+                        bd=1,
+                        relief="solid"
+                    )
+                    lbl_cell.grid(row=row_idx, column=col_idx, sticky="nsew")
 
 
 if __name__ == "__main__":

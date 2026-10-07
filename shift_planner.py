@@ -186,7 +186,7 @@ class CalendarDatePicker(ttk.Frame):
 class ShiftPlannerApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Arbeitsplan Generator mit Pensum & Zufallsverteilung")
+        self.root.title("Arbeitsplan Generator mit fairem Mo/Fr HO-Turnus")
         self.root.geometry("1280x860")
 
         self.employees = []   # List of dicts: {'name': str, 'pensum': int, 'fixed_off': int or None}
@@ -333,7 +333,7 @@ class ShiftPlannerApp:
         self.result_container = ttk.LabelFrame(self.root, text="Arbeitsplan Matrix (Wochenübersicht)", padding=5)
         self.result_container.pack(fill="both", expand=True, padx=10, pady=5)
 
-        # Beispieldaten erzeugen
+        # Beispieldaten
         sample_data = [
             {'name': 'Anna',  'pensum': 100, 'fixed_off': None},
             {'name': 'Ben',   'pensum': 80,  'fixed_off': 2},    # Fixer Mittwoch
@@ -494,8 +494,12 @@ class ShiftPlannerApp:
         unstaffed_warnings = []
         shift_counts = {emp['name']: {"Frühschicht": 0, "Spätschicht": 0} for emp in self.employees}
 
-        # 2. Wochenweise Berechnung
-        for (year, week_num), week_days in weeks_dict.items():
+        # Zähler für fair gewichteten Turnus bei Freitag & Montag Homeoffice
+        monday_ho_counts = defaultdict(int)
+        friday_ho_counts = defaultdict(int)
+
+        # 2. Chronologische wochenweise Berechnung
+        for (year, week_num), week_days in sorted(weeks_dict.items()):
             
             # Wöchentliches HO-Limit festlegen (Pensum berücksichtigen)
             weekly_ho_max = {}
@@ -529,19 +533,14 @@ class ShiftPlannerApp:
             for emp in self.employees:
                 e_name = emp['name']
                 if emp['pensum'] < 100:
-                    # Wie viele freie Tage pro Woche stehen der Person zu? (80% -> 1 Tag, 60% -> 2 Tage)
                     target_off_days = (100 - emp['pensum']) // 20
-                    
-                    # Wie viele freie Tage sind bereits eingetragen (z.B. fixer Tag oder Ferien)?
                     existing_off_count = sum(
                         1 for d in week_days 
                         if plan[e_name].get(d) in ["Teilzeit (Frei)", "Ferien"]
                     )
-                    
                     needed_random_off = target_off_days - existing_off_count
 
                     if needed_random_off > 0:
-                        # Freie Tage zur Auswahl (Tage, die noch nicht verplant sind)
                         candidate_days = [d for d in week_days if d not in plan[e_name]]
                         if len(candidate_days) >= needed_random_off:
                             selected_off_days = random.sample(candidate_days, needed_random_off)
@@ -561,6 +560,10 @@ class ShiftPlannerApp:
                             if ho_weekly_count[e_name] < weekly_ho_max[e_name]:
                                 plan[e_name][day] = "Homeoffice"
                                 ho_weekly_count[e_name] += 1
+                                if day.weekday() == 0:
+                                    monday_ho_counts[e_name] += 1
+                                elif day.weekday() == 4:
+                                    friday_ho_counts[e_name] += 1
                         else:
                             plan[e_name][day] = w_type
                             shift_counts[e_name][w_type] += 1
@@ -580,8 +583,60 @@ class ShiftPlannerApp:
                             if on_site_count - 1 >= 2 or len(self.employees) < 3:
                                 plan[e_name][day] = "Homeoffice"
                                 ho_weekly_count[e_name] += 1
+                                if day.weekday() == 0:
+                                    monday_ho_counts[e_name] += 1
+                                elif day.weekday() == 4:
+                                    friday_ho_counts[e_name] += 1
 
-            # F. Automatische & Zufällige Homeoffice-Verteilung
+            # F. Faire Turnus-Verteilung für FREITAG Homeoffice (Minimale Freitag-Anzahl gewinnt)
+            friday = next((d for d in week_days if d.weekday() == 4), None)
+            if friday:
+                friday_has_ho = any(plan[e['name']].get(friday) == "Homeoffice" for e in self.employees)
+                if not friday_has_ho:
+                    friday_candidates = []
+                    for emp in self.employees:
+                        e_name = emp['name']
+                        if friday not in plan[e_name] and ho_weekly_count[e_name] < weekly_ho_max[e_name]:
+                            on_site_count = sum(
+                                1 for e in self.employees 
+                                if plan[e['name']].get(friday) not in ["Ferien", "Homeoffice", "Teilzeit (Frei)"]
+                            )
+                            if on_site_count > 2 or len(self.employees) <= 2:
+                                friday_candidates.append(e_name)
+
+                    if friday_candidates:
+                        # Sortieren nach geringster Anzahl bisheriger Freitag-HOs
+                        friday_candidates.sort(key=lambda name: (friday_ho_counts[name], random.random()))
+                        selected_emp = friday_candidates[0]
+                        plan[selected_emp][friday] = "Homeoffice"
+                        ho_weekly_count[selected_emp] += 1
+                        friday_ho_counts[selected_emp] += 1
+
+            # G. Faire Turnus-Verteilung für MONTAG Homeoffice (Minimale Montag-Anzahl gewinnt)
+            monday = next((d for d in week_days if d.weekday() == 0), None)
+            if monday:
+                monday_has_ho = any(plan[e['name']].get(monday) == "Homeoffice" for e in self.employees)
+                if not monday_has_ho:
+                    monday_candidates = []
+                    for emp in self.employees:
+                        e_name = emp['name']
+                        if monday not in plan[e_name] and ho_weekly_count[e_name] < weekly_ho_max[e_name]:
+                            on_site_count = sum(
+                                1 for e in self.employees 
+                                if plan[e['name']].get(monday) not in ["Ferien", "Homeoffice", "Teilzeit (Frei)"]
+                            )
+                            if on_site_count > 2 or len(self.employees) <= 2:
+                                monday_candidates.append(e_name)
+
+                    if monday_candidates:
+                        # Sortieren nach geringster Anzahl bisheriger Montag-HOs
+                        monday_candidates.sort(key=lambda name: (monday_ho_counts[name], random.random()))
+                        selected_emp = monday_candidates[0]
+                        plan[selected_emp][monday] = "Homeoffice"
+                        ho_weekly_count[selected_emp] += 1
+                        monday_ho_counts[selected_emp] += 1
+
+            # H. Automatische Verteilung verbleibender Homeofficetage
             shuffled_emps = list(self.employees)
             random.shuffle(shuffled_emps)
 
@@ -590,9 +645,8 @@ class ShiftPlannerApp:
                 while ho_weekly_count[e_name] < weekly_ho_max[e_name]:
                     candidate_days = []
                     for day in week_days:
-                        if day in plan[e_name]: # Bereits Ferien, Teilzeit, Wunsch oder HO
+                        if day in plan[e_name]:
                             continue
-                        # Mindestbesetzung (mind. 2 vor Ort) prüfen
                         on_site_count = sum(
                             1 for e in self.employees 
                             if plan[e['name']].get(day) not in ["Ferien", "Homeoffice", "Teilzeit (Frei)"]
@@ -603,25 +657,20 @@ class ShiftPlannerApp:
                     if not candidate_days:
                         break
 
-                    friday_candidates = [d for d in candidate_days if d.weekday() == 4]
-                    friday_has_ho = any(
-                        plan[e['name']].get(d) == "Homeoffice" 
-                        for e in self.employees for d in week_days if d.weekday() == 4
-                    )
-
-                    if friday_candidates and not friday_has_ho:
-                        selected_day = random.choice(friday_candidates)
+                    non_wed_candidates = [d for d in candidate_days if d.weekday() != 2]
+                    if non_wed_candidates:
+                        selected_day = random.choice(non_wed_candidates)
                     else:
-                        non_wed_candidates = [d for d in candidate_days if d.weekday() != 2]
-                        if non_wed_candidates:
-                            selected_day = random.choice(non_wed_candidates)
-                        else:
-                            selected_day = random.choice(candidate_days)
+                        selected_day = random.choice(candidate_days)
 
                     plan[e_name][selected_day] = "Homeoffice"
                     ho_weekly_count[e_name] += 1
+                    if selected_day.weekday() == 0:
+                        monday_ho_counts[e_name] += 1
+                    elif selected_day.weekday() == 4:
+                        friday_ho_counts[e_name] += 1
 
-            # G. Schichteinteilung (Früh- vs. Spätschicht) vor Ort
+            # I. Schichteinteilung (Früh- vs. Spätschicht) vor Ort
             for day in week_days:
                 on_site_emps = [
                     e['name'] for e in self.employees 
@@ -634,7 +683,6 @@ class ShiftPlannerApp:
                     unstaffed_warnings.append(day.strftime("%d/%m/%Y"))
                     continue
 
-                # Schichtverhältnis-Regeln: 3 Pers -> 2 Früh/1 Spät | 4 Pers -> 2 Früh/2 Spät
                 target_frueh = (N + 1) // 2
 
                 already_frueh = sum(1 for e in on_site_emps if plan[e].get(day) == "Frühschicht")

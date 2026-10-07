@@ -51,12 +51,10 @@ class CalendarDatePicker(ttk.Frame):
         self.view_year = current_dt.year
         self.view_month = current_dt.month
 
-        # TopLevel-Fenster ohne Rahmen für Dropdown-Look
         self.popup = tk.Toplevel(self)
         self.popup.wm_overrideredirect(True)
         self.popup.attributes("-topmost", True)
 
-        # Position exakt unter dem Eingabefeld
         x = self.entry.winfo_rootx()
         y = self.entry.winfo_rooty() + self.entry.winfo_height() + 2
         self.popup.geometry(f"+{x}+{y}")
@@ -106,9 +104,8 @@ class CalendarDatePicker(ttk.Frame):
                 is_today = (day_dt == today)
                 is_selected = (day_dt == self.get_date())
 
-                # ROTE MARKIERUNG FÜR HEUTE
                 if is_today:
-                    fg_color = "#D9534F"  # Roter Text
+                    fg_color = "#D9534F"
                     font_style = ("Arial", 8, "bold")
                 elif is_curr_month:
                     fg_color = "#000000"
@@ -118,9 +115,9 @@ class CalendarDatePicker(ttk.Frame):
                     font_style = ("Arial", 8)
 
                 if is_selected:
-                    bg_color = "#D0E8FF"  # Blau markiert für gewähltes Datum
+                    bg_color = "#D0E8FF"
                 elif is_today:
-                    bg_color = "#FFE6E6"  # Hellroter Hintergund für Heute
+                    bg_color = "#FFE6E6"
                 else:
                     bg_color = "#FFFFFF"
 
@@ -137,7 +134,6 @@ class CalendarDatePicker(ttk.Frame):
                 )
                 btn_day.grid(row=row_idx, column=col_idx, padx=1, pady=1)
 
-        # Fusszeile "Heute"
         btn_today = tk.Button(
             inner_frame,
             text=f"Heute: {today.strftime('%d.%m.%Y')}",
@@ -175,8 +171,8 @@ class CalendarDatePicker(ttk.Frame):
 class ShiftPlannerApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Arbeitsplan Generator mit Wochen-Matrix")
-        self.root.geometry("1200x800")
+        self.root.title("Arbeitsplan Generator mit intelligenter HO-Verteilung")
+        self.root.geometry("1200x820")
 
         self.employees = []
         self.wishes = []      # {'emp': str, 'date': date, 'type': str}
@@ -185,7 +181,7 @@ class ShiftPlannerApp:
         self._build_ui()
 
     def _build_ui(self):
-        # Steuerung
+        # Steuerung Frame
         control_frame = ttk.LabelFrame(self.root, text="Konfiguration & Erfassung", padding=10)
         control_frame.pack(fill="x", padx=10, pady=5)
 
@@ -246,16 +242,29 @@ class ShiftPlannerApp:
         btn_add_vac = ttk.Button(vac_frame, text="Ferien speichern", command=self.add_vacation)
         btn_add_vac.grid(row=2, column=0, columnspan=2, pady=6)
 
-        # Generieren Knopf
+        # Aktions-Buttons (Generieren & Reset)
+        btn_frame = tk.Frame(self.root)
+        btn_frame.pack(fill="x", padx=10, pady=5)
+
         btn_generate = tk.Button(
-            self.root, 
+            btn_frame, 
             text="Arbeitsplan Generieren", 
             bg="#2b5c8f", 
             fg="white", 
             font=("Arial", 11, "bold"), 
             command=self.generate_plan
         )
-        btn_generate.pack(fill="x", padx=10, pady=5)
+        btn_generate.pack(side="left", fill="x", expand=True, padx=(0, 5))
+
+        btn_reset = tk.Button(
+            btn_frame, 
+            text="Alles Zurücksetzen", 
+            bg="#C0392B", 
+            fg="white", 
+            font=("Arial", 11, "bold"), 
+            command=self.reset_all
+        )
+        btn_reset.pack(side="right", padx=(5, 0))
 
         # Farblegende
         legend_frame = tk.Frame(self.root)
@@ -278,7 +287,7 @@ class ShiftPlannerApp:
         self.result_container = ttk.LabelFrame(self.root, text="Arbeitsplan Matrix (Wochenübersicht)", padding=5)
         self.result_container.pack(fill="both", expand=True, padx=10, pady=5)
 
-        # Beispieldaten vorausfüllen
+        # Beispieldaten
         for name in ["Anna", "Ben", "Clara", "David"]:
             self.employees.append(name)
             self.lst_employees.insert(tk.END, name)
@@ -339,6 +348,18 @@ class ShiftPlannerApp:
         self.vacations.append({'emp': emp, 'start': s_dt, 'end': e_dt})
         messagebox.showinfo("Gespeichert", f"Ferien für {emp} vom {s_dt.strftime('%d/%m/%Y')} bis {e_dt.strftime('%d/%m/%Y')} erfasst.")
 
+    def reset_all(self):
+        """Löscht alle erfassten Wünsche und Ferien"""
+        if messagebox.askyesno("Zurücksetzen", "Möchtest du wirklich alle eingegebenen Wunschtage und Ferien zurücksetzen?"):
+            self.wishes.clear()
+            self.vacations.clear()
+            for widget in self.result_container.winfo_children():
+                widget.destroy()
+            messagebox.showinfo("Zurückgesetzt", "Alle Wunschtage und Ferien wurden erfolgreich gelöscht.")
+
+    def is_in_vacation(self, emp, d):
+        return any(v['start'] <= d <= v['end'] for v in self.vacations if v['emp'] == emp)
+
     def generate_plan(self):
         if not self.employees:
             messagebox.showwarning("Achtung", "Bitte mindestens einen Mitarbeiter erfassen.")
@@ -351,6 +372,7 @@ class ShiftPlannerApp:
             messagebox.showerror("Fehler", "Gültigen Zeitraum wählen.")
             return
 
+        # 1. Arbeitstage ermitteln (Mo-Fr)
         work_days = []
         curr = start_date
         while curr <= end_date:
@@ -362,14 +384,37 @@ class ShiftPlannerApp:
             messagebox.showinfo("Info", "Keine Arbeitstage (Mo-Fr) im gewählten Zeitraum.")
             return
 
+        # 2. Vorabermittlung von Tagen direkt VOR und NACH Ferien pro Mitarbeiter
+        pre_vac_days = set()   # (emp, day) -> Tag vor Ferien
+        post_vac_days = set()  # (emp, day) -> Tag nach Ferien
+
+        for emp in self.employees:
+            for idx, day in enumerate(work_days):
+                if not self.is_in_vacation(emp, day):
+                    if idx > 0 and self.is_in_vacation(emp, work_days[idx - 1]):
+                        post_vac_days.add((emp, day))
+                    if idx < len(work_days) - 1 and self.is_in_vacation(emp, work_days[idx + 1]):
+                        pre_vac_days.add((emp, day))
+
+        # Max HO Limit pro Woche ermitteln (Standard: 2, bei Ferienübergang in dieser Woche: 1)
+        weekly_ho_max = {}
+        for day in work_days:
+            y, w, _ = day.isocalendar()
+            week_key = f"{y}-W{w}"
+            for emp in self.employees:
+                if (emp, week_key) not in weekly_ho_max:
+                    weekly_ho_max[(emp, week_key)] = 2
+                if (emp, day) in pre_vac_days or (emp, day) in post_vac_days:
+                    weekly_ho_max[(emp, week_key)] = 1  # Wegen Ferien-HO darf kein weiteres HO vergeben werden
+
         plan = {emp: {} for emp in self.employees}
-        ho_weekly_count = {emp: {} for emp in self.employees}
+        ho_weekly_count = defaultdict(lambda: defaultdict(int))
         shift_counts = {emp: {"Frühschicht": 0, "Spätschicht": 0} for emp in self.employees}
         unstaffed_warnings = []
 
-        # Nach Kalenderwochen gruppieren
         weeks_dict = defaultdict(list)
 
+        # 3. Tagesweise Berechnung
         for day in work_days:
             year, week_num, _ = day.isocalendar()
             week_key = f"{year}-W{week_num}"
@@ -377,29 +422,41 @@ class ShiftPlannerApp:
 
             available_emps = []
 
+            # A. Ferien kennzeichnen
             for emp in self.employees:
-                on_vac = any(v['start'] <= day <= v['end'] for v in self.vacations if v['emp'] == emp)
-                if on_vac:
+                if self.is_in_vacation(emp, day):
                     plan[emp][day] = "Ferien"
                 else:
                     available_emps.append(emp)
 
             assigned_today = {}
 
+            # B. Benutzerdefinierte Wunschtage
             for emp in list(available_emps):
                 emp_wishes = [w for w in self.wishes if w['emp'] == emp and w['date'] == day]
                 if emp_wishes:
                     w_type = emp_wishes[0]['type']
                     if w_type == "Homeoffice":
-                        if ho_weekly_count[emp].get(week_key, 0) < 2:
+                        if ho_weekly_count[emp][week_key] < weekly_ho_max[(emp, week_key)]:
                             assigned_today[emp] = "Homeoffice"
-                            ho_weekly_count[emp][week_key] = ho_weekly_count[emp].get(week_key, 0) + 1
+                            ho_weekly_count[emp][week_key] += 1
                             available_emps.remove(emp)
                     else:
                         assigned_today[emp] = w_type
                         shift_counts[emp][w_type] += 1
                         available_emps.remove(emp)
 
+            # C. Prioritäre Ferien-Übergangstage (Pre / Post Vacation HO)
+            for emp in list(available_emps):
+                if (emp, day) in pre_vac_days or (emp, day) in post_vac_days:
+                    if ho_weekly_count[emp][week_key] < weekly_ho_max[(emp, week_key)]:
+                        # Prüfen, ob noch genügend Mitarbeiter für Schichten übrig bleiben
+                        if len(available_emps) - 1 >= 2 or (len(self.employees) < 3):
+                            assigned_today[emp] = "Homeoffice"
+                            ho_weekly_count[emp][week_key] += 1
+                            available_emps.remove(emp)
+
+            # D. Mindestbesetzung garantieren (1x Frühschicht, 1x Spätschicht)
             has_frueh = any(val == "Frühschicht" for val in assigned_today.values())
             has_spaet = any(val == "Spätschicht" for val in assigned_today.values())
 
@@ -420,6 +477,19 @@ class ShiftPlannerApp:
             if not has_frueh or not has_spaet:
                 unstaffed_warnings.append(day.strftime("%d/%m/%Y"))
 
+            # E. Automatische & faire Verteilung verbleibender Homeofficetage
+            # Sortiere nach wer aktuell am wenigsten HO in der Woche hat
+            available_emps.sort(key=lambda e: ho_weekly_count[e][week_key])
+
+            for emp in list(available_emps):
+                max_allowed = weekly_ho_max[(emp, week_key)]
+                if ho_weekly_count[emp][week_key] < max_allowed:
+                    # Mindestbesetzung für verbleibende Personen wahren
+                    assigned_today[emp] = "Homeoffice"
+                    ho_weekly_count[emp][week_key] += 1
+                    available_emps.remove(emp)
+
+            # F. Restliche Mitarbeiter auf Früh- und Spätschicht aufteilen
             for emp in available_emps:
                 chosen = "Frühschicht" if shift_counts[emp]["Frühschicht"] <= shift_counts[emp]["Spätschicht"] else "Spätschicht"
                 assigned_today[emp] = chosen
@@ -457,14 +527,12 @@ class ShiftPlannerApp:
 
         weekday_names = ["Mo", "Di", "Mi", "Do", "Fr"]
 
-        # WOCHENWEISE MATRIZEN RENDERN
         for (year, week_num), days in weeks_dict.items():
             week_title = f" Kalenderwoche {week_num} ({days[0].strftime('%d.%m.%Y')} bis {days[-1].strftime('%d.%m.%Y')}) "
             
             week_frame = ttk.LabelFrame(scroll_frame, text=week_title, padding=8)
             week_frame.pack(fill="x", expand=True, padx=10, pady=10)
 
-            # Header-Zeile (Mitarbeiter + Mo bis Fr)
             lbl_top_left = tk.Label(
                 week_frame, text="Mitarbeiter", font=("Arial", 9, "bold"), 
                 bg="#E0E0E0", width=16, height=2, bd=1, relief="solid"
@@ -479,7 +547,6 @@ class ShiftPlannerApp:
                 )
                 lbl_hdr.grid(row=0, column=col_idx, sticky="nsew")
 
-            # Zeilen pro Mitarbeiter für diese spezifische Woche
             for row_idx, emp in enumerate(self.employees, start=1):
                 lbl_name = tk.Label(
                     week_frame, text=emp, font=("Arial", 9, "bold"), 

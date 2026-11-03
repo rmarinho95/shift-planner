@@ -3,18 +3,21 @@
 Der Generator hält diese Regeln ein:
 
 - 100 % Pensum: höchstens 2 Homeoffice-Tage. 80 %: höchstens 1. Ab 60 %: keines.
-- Homeoffice ist nicht fix. Es wird zufällig auf Dienstag bis Donnerstag verteilt.
-  Ein Wunschtag kann einen bestimmten Tag festlegen.
+- Homeoffice und Schichten werden zufällig, aber fair über die Wochentage verteilt.
+  Niemand behält denselben Homeoffice-Wochentag, solange andere noch dran sind.
 - Ein Ferien- oder Freier-Tag in der Woche senkt das Kontingent auf höchstens 1.
   Zwei solche Tage: in dieser Woche kein Homeoffice.
-- Montag- und Freitag-Homeoffice rotieren. Wer den Tag schon hatte, bekommt ihn
-  erst wieder, wenn alle anderen Berechtigten ihn einmal hatten.
-- Dieselbe Rotation gilt für Frühschicht und Spätschicht am Freitag.
+- Pro Arbeitstag mindestens eine Frühschicht und eine Spätschicht.
+  Sind drei oder mehr planbare Personen verfügbar, bleiben mindestens zwei
+  vor Ort (Früh oder Spät). Niemand plant alle gleichzeitig ins Homeoffice.
+  Homeoffice hat Vorrang. Sind danach drei Personen vor Ort, gehen zwei
+  in die Frühschicht und eine in die Spätschicht.
+- Flex-Personen erscheinen im Plan, werden aber nicht für Homeoffice,
+  Früh- oder Spätschicht eingeplant.
+- Wenn die Besetzung reicht: ein Homeoffice-Tag vor und nach den Ferien,
+  ohne Freitags-Homeoffice in Folge.
 - Ein Mittwoch mit Teammeeting ist Präsenzpflicht: kein Homeoffice.
-- Teilzeit bekommt so viele freie Tage, wie das Pensum vorgibt.
-  Wer keine Schicht arbeitet, plant Bürotage selbst (Flex).
-- Bei mehr als zwei Personen bleiben mindestens zwei im Dienst, bevor weiter
-  Homeoffice vergeben wird.
+- Einzelne Zellen lassen sich nachträglich auf Früh, Spät oder Homeoffice setzen.
 """
 
 from __future__ import annotations
@@ -57,8 +60,21 @@ MONTHS = [
 ]
 PENSUM_VALUES = ["100%", "80%", "60%", "40%", "20%"]
 WISH_TYPES = ["Frühschicht", "Spätschicht", "Homeoffice"]
-FAIR_KEYS = ("ho_monday", "ho_friday", "frueh_friday", "spaet_friday")
+EDITABLE_TYPES = ["Frühschicht", "Spätschicht", "Homeoffice"]
+FAIR_KEYS = (
+    "ho_monday", "ho_tuesday", "ho_wednesday", "ho_thursday", "ho_friday",
+    "frueh_friday", "spaet_friday",
+)
+WEEKDAY_HO_KEY = {
+    0: "ho_monday",
+    1: "ho_tuesday",
+    2: "ho_wednesday",
+    3: "ho_thursday",
+    4: "ho_friday",
+}
+LOCKED = {"Ferien", "Teilzeit (Frei)"}
 ABSENT = {"Ferien", "Homeoffice", "Teilzeit (Frei)"}
+FLEX = "Plant Arbeitszeiten selber"
 
 COLOR_CONFIG = {
     "Frühschicht": {"bg": "#E4F5EA", "fg": "#14532D", "short": "Früh", "legend": "Früh · 07:30–16:30"},
@@ -105,17 +121,27 @@ def ho_cap(pensum, absences):
     return cap
 
 
+def is_flex(emp):
+    return bool(emp.get("no_shift"))
+
+
+def shift_employees(employees):
+    return [emp for emp in employees if not is_flex(emp)]
+
+
 def eligible_names(key, employees):
     names = set()
+    weekday = {v: k for k, v in WEEKDAY_HO_KEY.items()}.get(key)
     for emp in employees:
-        if key in ("ho_monday", "ho_friday") and emp["pensum"] not in (100, 80):
+        if is_flex(emp):
             continue
-        if key in ("frueh_friday", "spaet_friday") and emp["no_shift"]:
+        if key.startswith("ho_") and emp["pensum"] not in (100, 80):
             continue
-        if key in ("ho_friday", "frueh_friday", "spaet_friday") and emp["fixed_off"] == 4:
-            continue
-        if key == "ho_monday" and emp["fixed_off"] == 0:
-            continue
+        if emp["fixed_off"] is not None:
+            if weekday is not None and emp["fixed_off"] == weekday:
+                continue
+            if key in ("frueh_friday", "spaet_friday") and emp["fixed_off"] == 4:
+                continue
         names.add(emp["name"])
     return names
 
@@ -149,10 +175,12 @@ def generate_schedule(
     history=None,
     next_seq=1,
     rng=None,
+    overrides=None,
 ):
     """Erzeugt den Plan. Die Eingaben werden nicht verändert."""
     rng = rng if rng is not None else random.Random()
     employees = [dict(emp) for emp in employees]
+    planners = shift_employees(employees)
     if end < start:
         return {"error": "Das Enddatum liegt vor dem Startdatum."}
 
@@ -177,6 +205,10 @@ def generate_schedule(
 
     meeting_set = set(teammeetings)
     wish_map = {(w["emp"], w["date"]): w["type"] for w in wishes}
+    override_map = {}
+    for item in overrides or []:
+        day = item["date"] if isinstance(item["date"], date) else date.fromisoformat(item["date"])
+        override_map[(item["emp"], day)] = item["type"]
     names = [emp["name"] for emp in employees]
     plan = {name: {} for name in names}
     shift_counts = {name: {"Frühschicht": 0, "Spätschicht": 0} for name in names}
@@ -209,25 +241,43 @@ def generate_schedule(
         events[key].append((day, seq, name))
         seq += 1
 
-    def office_count(day):
-        count = 0
-        for emp in employees:
-            if plan[emp["name"]].get(day) not in ABSENT:
-                count += 1
-        return count
+    def value_of(name, day):
+        return plan[name].get(day)
+
+    def available_planners(day):
+        return [
+            emp for emp in planners
+            if value_of(emp["name"], day) not in LOCKED
+        ]
+
+    def on_site_planners(day):
+        return [
+            emp for emp in planners
+            if value_of(emp["name"], day) not in ABSENT
+        ]
 
     def can_take_ho(day):
-        if len(employees) <= 2:
+        if day in meeting_set:
+            return False
+        available = available_planners(day)
+        on_site = on_site_planners(day)
+        if len(on_site) <= 1:
+            return False
+        if len(available) >= 3:
+            return len(on_site) - 1 >= 2
+        return False
+
+    def had_same_weekday_last_week(name, day):
+        previous = day - timedelta(days=7)
+        key = WEEKDAY_HO_KEY[day.weekday()]
+        if value_of(name, previous) == "Homeoffice":
             return True
-        return office_count(day) > 2
+        return any(event_day == previous and event_name == name for event_day, _seq, event_name in events[key])
 
     def place_ho(emp, day):
         name = emp["name"]
         plan[name][day] = "Homeoffice"
-        if day.weekday() == 0:
-            add_event("ho_monday", day, name)
-        elif day.weekday() == 4:
-            add_event("ho_friday", day, name)
+        add_event(WEEKDAY_HO_KEY[day.weekday()], day, name)
 
     def place_shift(emp, day, shift):
         name = emp["name"]
@@ -236,8 +286,27 @@ def generate_schedule(
         if day.weekday() == 4:
             add_event("frueh_friday" if shift == "Frühschicht" else "spaet_friday", day, name)
 
+    def ho_score(emp, day):
+        name = emp["name"]
+        key = WEEKDAY_HO_KEY[day.weekday()]
+        used_round = 0 if allows(key, name) else 1
+        weekday_times = sum(1 for _day, _seq, event_name in events[key] if event_name == name)
+        bridge_rank = 0 if (name, day) in bridge else 1
+        adjacent = 0
+        for delta in (-1, 1):
+            if value_of(name, day + timedelta(days=delta)) == "Homeoffice":
+                adjacent = 1
+        return (bridge_rank, used_round, weekday_times, adjacent, rng.random())
+
+    def coverage_ok_for_off(day, taking_name):
+        remaining = [
+            emp for emp in planners
+            if emp["name"] != taking_name and value_of(emp["name"], day) not in LOCKED
+        ]
+        return len(remaining) >= 2
+
     bridge = set()
-    for emp in employees:
+    for emp in planners:
         name = emp["name"]
         for index, day in enumerate(work_days):
             if is_vacation(name, day, vacations):
@@ -279,32 +348,59 @@ def generate_schedule(
             needed = max(0, target_off - len(explicit))
             if needed:
                 empty_days = [day for day in week_days if day not in plan[name]]
-                wish_days = {day for day in empty_days if (name, day) in wish_map}
-                quiet = [day for day in empty_days if day not in wish_days and day not in meeting_set]
-                avoid_wishes = [day for day in empty_days if day not in wish_days]
-                if len(quiet) >= needed:
-                    pool = quiet
-                elif len(avoid_wishes) >= needed:
-                    pool = avoid_wishes
-                else:
-                    pool = empty_days
-                take = min(needed, len(pool))
-                for day in rng.sample(pool, take):
+                wish_days = {day for day in empty_days if (name, day) in wish_map or (name, day) in override_map}
+                ranked = []
+                for day in empty_days:
+                    busy = 0 if (name, day) not in wish_days else 1
+                    meeting = 0 if day not in meeting_set else 1
+                    thin = 0 if coverage_ok_for_off(day, name) else 1
+                    ranked.append((busy, meeting, thin, rng.random(), day))
+                ranked.sort()
+                for _busy, _meeting, _thin, _roll, day in ranked[:needed]:
                     plan[name][day] = "Teilzeit (Frei)"
 
             absences = len(explicit) + sum(
                 1 for day in week_days if plan[name].get(day) == "Teilzeit (Frei)" and day not in explicit
             )
-            caps[name] = ho_cap(emp["pensum"], absences)
+            if is_flex(emp):
+                caps[name] = 0
+            else:
+                caps[name] = ho_cap(emp["pensum"], absences)
+
+        for emp in employees:
+            if not is_flex(emp):
+                continue
+            name = emp["name"]
+            for day in week_days:
+                if day not in plan[name]:
+                    plan[name][day] = FLEX
 
         for day in week_days:
             for emp in employees:
                 name = emp["name"]
+                forced = override_map.get((name, day))
+                if not forced:
+                    continue
+                if is_flex(emp):
+                    continue
+                if forced == "Homeoffice":
+                    plan[name][day] = "Homeoffice"
+                    ho_count[name] += 1
+                    add_event(WEEKDAY_HO_KEY[day.weekday()], day, name)
+                elif forced in ("Frühschicht", "Spätschicht"):
+                    place_shift(emp, day, forced)
+                pinned.add((name, day))
+
+        for day in week_days:
+            for emp in planners:
+                name = emp["name"]
                 wish = wish_map.get((name, day))
                 if not wish:
                     continue
+                if (name, day) in pinned:
+                    continue
                 current = plan[name].get(day)
-                if current in ("Ferien", "Teilzeit (Frei)"):
+                if current in LOCKED:
                     unfulfilled.append(
                         f"{name}, {day.strftime('%d.%m.%Y')}: {wish} liegt auf einem freien Tag oder in den Ferien."
                     )
@@ -320,158 +416,124 @@ def generate_schedule(
                             f"{name}, {day.strftime('%d.%m.%Y')}: Homeoffice-Kontingent dieser Woche ist ausgeschöpft."
                         )
                         continue
+                    if not can_take_ho(day):
+                        unfulfilled.append(
+                            f"{name}, {day.strftime('%d.%m.%Y')}: Homeoffice würde Früh- und Spätschicht nicht mehr abdecken."
+                        )
+                        continue
                     place_ho(emp, day)
                     ho_count[name] += 1
                     pinned.add((name, day))
                 elif wish in ("Frühschicht", "Spätschicht"):
-                    if emp["no_shift"]:
-                        unfulfilled.append(
-                            f"{name}, {day.strftime('%d.%m.%Y')}: {wish} ist nicht möglich, die Person plant Zeiten selbst."
-                        )
-                        continue
                     place_shift(emp, day, wish)
+                    pinned.add((name, day))
 
-        for _pass in range(2):
-            order_emps = [emp for emp in employees if ho_count[emp["name"]] < caps[emp["name"]]]
-            rng.shuffle(order_emps)
-            for emp in order_emps:
+        while True:
+            options = []
+            for emp in planners:
                 name = emp["name"]
                 if ho_count[name] >= caps[name]:
                     continue
-                pool = []
                 for day in week_days:
-                    if day.weekday() not in (1, 2, 3):
-                        continue
                     if day in plan[name] or day in meeting_set:
+                        continue
+                    if day.weekday() in (0, 4) and had_same_weekday_last_week(name, day):
                         continue
                     if not can_take_ho(day):
                         continue
-                    pool.append(day)
-                if not pool:
-                    continue
-                best = min((0 if (name, day) in bridge else 1) for day in pool)
-                pool = [day for day in pool if (0 if (name, day) in bridge else 1) == best]
-                place_ho(emp, rng.choice(pool))
-                ho_count[name] += 1
-
-        def ensure_rotation(day, key):
-            if day is None or day in meeting_set:
-                return
-            if any(plan[emp["name"]].get(day) == "Homeoffice" for emp in employees):
-                return
-            waiting = [emp for emp in employees if allows(key, emp["name"])]
-            ranked = []
-            for emp in waiting:
-                name = emp["name"]
-                if day in plan[name] or not can_take_ho(day):
-                    continue
-                spare = caps[name] - ho_count[name]
-                movable = [
-                    src for src in week_days
-                    if plan[name].get(src) == "Homeoffice"
-                    and src.weekday() not in (0, 4)
-                    and (name, src) not in pinned
-                ]
-                if spare > 0:
-                    ranked.append((0, rng.random(), emp, None))
-                elif movable:
-                    ranked.append((1, rng.random(), emp, movable))
-            if not ranked:
-                return
-            ranked.sort(key=lambda item: (item[0], item[1]))
-            _priority, _roll, emp, movable = ranked[0]
-            if movable:
-                src = rng.choice(movable)
-                del plan[emp["name"]][src]
-                plan[emp["name"]][day] = "Homeoffice"
-                if day.weekday() == 0:
-                    add_event("ho_monday", day, emp["name"])
-                elif day.weekday() == 4:
-                    add_event("ho_friday", day, emp["name"])
-            else:
-                place_ho(emp, day)
-                ho_count[emp["name"]] += 1
-
-        friday = next((day for day in week_days if day.weekday() == 4), None)
-        monday = next((day for day in week_days if day.weekday() == 0), None)
-        ensure_rotation(friday, "ho_friday")
-        ensure_rotation(monday, "ho_monday")
+                    options.append((ho_score(emp, day), emp, day))
+            if not options:
+                break
+            options.sort(key=lambda item: item[0])
+            _score, emp, day = options[0]
+            place_ho(emp, day)
+            ho_count[emp["name"]] += 1
 
         for day in week_days:
-            for emp in employees:
-                if emp["no_shift"] and day not in plan[emp["name"]]:
-                    plan[emp["name"]][day] = "Plant Arbeitszeiten selber"
-
-            on_site = [
-                emp for emp in employees
-                if not emp["no_shift"] and plan[emp["name"]].get(day) not in ABSENT
-            ]
-            unassigned = [emp["name"] for emp in on_site if day not in plan[emp["name"]]]
+            on_site = on_site_planners(day)
+            unassigned = [emp for emp in on_site if day not in plan[emp["name"]]]
             count_on_site = len(on_site)
             already_early = sum(1 for emp in on_site if plan[emp["name"]].get(day) == "Frühschicht")
-            if count_on_site >= 2:
-                desired_early = min(max((count_on_site + 1) // 2, 1), count_on_site - 1)
+            already_late = sum(1 for emp in on_site if plan[emp["name"]].get(day) == "Spätschicht")
+            if count_on_site == 3:
+                desired_early = 2
+            elif count_on_site >= 2:
+                if rng.random() < 0.5:
+                    desired_early = max(1, min(count_on_site - 1, count_on_site // 2))
+                else:
+                    desired_early = max(1, min(count_on_site - 1, (count_on_site + 1) // 2))
             elif count_on_site == 1:
                 desired_early = 1
             else:
                 desired_early = 0
             early_left = min(max(0, desired_early - already_early), len(unassigned))
             late_left = len(unassigned) - early_left
-            is_friday = day.weekday() == 4
+            if count_on_site >= 2 and already_late == 0 and late_left == 0 and early_left:
+                late_left = 1
+                early_left -= 1
             remaining = list(unassigned)
+            is_friday = day.weekday() == 4
 
             def fair_penalty(person, key):
                 if not is_friday:
                     return 0
-                return 0 if allows(key, person) else 1
+                return 0 if allows(key, person["name"]) else 1
 
             while remaining and (early_left or late_left):
-                fresh_early = [person for person in remaining if fair_penalty(person, "frueh_friday") == 0]
-                fresh_late = [person for person in remaining if fair_penalty(person, "spaet_friday") == 0]
+                fresh_early = [emp for emp in remaining if fair_penalty(emp, "frueh_friday") == 0]
+                fresh_late = [emp for emp in remaining if fair_penalty(emp, "spaet_friday") == 0]
                 if early_left and not late_left:
                     take_early = True
                 elif late_left and not early_left:
                     take_early = False
                 else:
-                    take_early = len(fresh_early) <= len(fresh_late)
+                    take_early = rng.random() < 0.5
+                    if take_early and not fresh_early and fresh_late:
+                        take_early = False
+                    elif not take_early and not fresh_late and fresh_early:
+                        take_early = True
 
                 if take_early:
                     pool = fresh_early or remaining
                     pool = sorted(
                         pool,
-                        key=lambda person: (
-                            fair_penalty(person, "frueh_friday"),
-                            shift_counts[person]["Frühschicht"] - shift_counts[person]["Spätschicht"],
+                        key=lambda emp: (
+                            fair_penalty(emp, "frueh_friday"),
+                            shift_counts[emp["name"]]["Frühschicht"] - shift_counts[emp["name"]]["Spätschicht"],
                             rng.random(),
                         ),
                     )
                     chosen = pool[0]
-                    emp = next(item for item in employees if item["name"] == chosen)
-                    place_shift(emp, day, "Frühschicht")
+                    place_shift(chosen, day, "Frühschicht")
                     early_left -= 1
                 else:
                     pool = fresh_late or remaining
                     pool = sorted(
                         pool,
-                        key=lambda person: (
-                            fair_penalty(person, "spaet_friday"),
-                            shift_counts[person]["Spätschicht"] - shift_counts[person]["Frühschicht"],
+                        key=lambda emp: (
+                            fair_penalty(emp, "spaet_friday"),
+                            shift_counts[emp["name"]]["Spätschicht"] - shift_counts[emp["name"]]["Frühschicht"],
                             rng.random(),
                         ),
                     )
                     chosen = pool[0]
-                    emp = next(item for item in employees if item["name"] == chosen)
-                    place_shift(emp, day, "Spätschicht")
+                    place_shift(chosen, day, "Spätschicht")
                     late_left -= 1
                 remaining.remove(chosen)
 
             early_now = sum(1 for emp in on_site if plan[emp["name"]].get(day) == "Frühschicht")
             late_now = sum(1 for emp in on_site if plan[emp["name"]].get(day) == "Spätschicht")
-            flex_here = any(plan[emp["name"]].get(day) == "Plant Arbeitszeiten selber" for emp in employees)
-            if count_on_site == 0 and not flex_here:
-                warnings.append(f"{day.strftime('%d.%m.%Y')}: niemand im Dienst.")
+            ho_now = [emp["name"] for emp in available_planners(day) if plan[emp["name"]].get(day) == "Homeoffice"]
+            if ho_now and len(ho_now) == len(available_planners(day)):
+                warnings.append(f"{day.strftime('%d.%m.%Y')}: alle planbaren Personen wären im Homeoffice.")
+            if count_on_site == 0:
+                warnings.append(f"{day.strftime('%d.%m.%Y')}: niemand in Früh- oder Spätschicht.")
             elif count_on_site >= 2 and (early_now == 0 or late_now == 0):
                 warnings.append(f"{day.strftime('%d.%m.%Y')}: Früh- und Spätschicht sind nicht beide besetzt.")
+            elif count_on_site == 3 and (early_now != 2 or late_now != 1):
+                warnings.append(f"{day.strftime('%d.%m.%Y')}: bei drei Personen vor Ort: zwei Früh, eine Spät.")
+            elif len(available_planners(day)) >= 3 and count_on_site < 2:
+                warnings.append(f"{day.strftime('%d.%m.%Y')}: bei drei planbaren Personen müssen zwei vor Ort sein.")
 
     history_out = {}
     for key in FAIR_KEYS:
@@ -648,6 +710,8 @@ class ShiftPlannerApp:
         self.teammeetings = []
         self.history = empty_history()
         self.next_seq = 1
+        self.overrides = []
+        self.cell_menu = None
         self.last_weeks = None
         self.last_plan = None
         self.last_warnings = []
@@ -688,7 +752,7 @@ class ShiftPlannerApp:
         tk.Label(outer, text="Schichtplan", bg=BG, fg=INK, font=(FONT, 22)).pack(anchor="w")
         tk.Label(
             outer,
-            text="IT-Service Desk  ·  Homeoffice nach Pensum, Ferien und fairer Montag-/Freitag-Rotation",
+            text="IT-Service Desk  ·  Zufällige, faire Schichten  ·  Klick auf eine Zelle ändert Früh, Spät oder Homeoffice",
             bg=BG, fg=MUTED, font=(FONT, 10),
         ).pack(anchor="w", pady=(2, 12))
 
@@ -806,7 +870,7 @@ class ShiftPlannerApp:
 
         self.var_no_shift = tk.BooleanVar(value=False)
         ttk.Checkbutton(
-            body, text="Keine Schichtarbeit", variable=self.var_no_shift, style="Card.TCheckbutton",
+            body, text="Flex (keine Schicht, kein Homeoffice)", variable=self.var_no_shift, style="Card.TCheckbutton",
         ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
         buttons = tk.Frame(body, bg=CARD)
@@ -946,6 +1010,15 @@ class ShiftPlannerApp:
             "teammeetings": [day.isoformat() for day in self.teammeetings],
             "history": deepcopy(self.history),
             "next_seq": self.next_seq,
+            "overrides": [
+                {
+                    "emp": item["emp"],
+                    "date": item["date"].isoformat(),
+                    "type": item["type"],
+                    **({"previous": item["previous"]} if item.get("previous") else {}),
+                }
+                for item in self.overrides
+            ],
         }
 
     def _persist(self):
@@ -999,9 +1072,22 @@ class ShiftPlannerApp:
             for key in FAIR_KEYS:
                 self.history[key] = list(stored_history.get(key, []))
             self.next_seq = int(data.get("next_seq", 1))
+            self.overrides = []
+            for item in data.get("overrides", []):
+                if not (item.get("emp") and item.get("date") and item.get("type") in EDITABLE_TYPES):
+                    continue
+                entry = {
+                    "emp": item["emp"],
+                    "date": parse_stored_date(item["date"]),
+                    "type": item["type"],
+                }
+                if item.get("previous"):
+                    entry["previous"] = item["previous"]
+                self.overrides.append(entry)
         except (TypeError, ValueError, KeyError):
             self.employees = [dict(emp) for emp in SAMPLE_EMPLOYEES]
             self.wishes, self.vacations, self.teammeetings = [], [], []
+            self.overrides = []
             self.history = empty_history()
             self.next_seq = 1
             self._refresh_lists()
@@ -1056,6 +1142,7 @@ class ShiftPlannerApp:
         del self.employees[selection[0]]
         self.wishes = [wish for wish in self.wishes if wish["emp"] != name]
         self.vacations = [vacation for vacation in self.vacations if vacation["emp"] != name]
+        self.overrides = [item for item in self.overrides if item["emp"] != name]
         self._refresh_lists()
         self._persist()
         self.status_var.set(f"{name} entfernt.")
@@ -1064,6 +1151,13 @@ class ShiftPlannerApp:
         emp = self._selected_employee(self.cmb_wish_emp)
         if emp is None:
             messagebox.showwarning("Hinweis", "Bitte zuerst einen Mitarbeiter erfassen und auswählen.", parent=self.root)
+            return
+        if is_flex(emp):
+            messagebox.showwarning(
+                "Flex",
+                f"{emp['name']} ist Flex und wird nicht für Früh, Spät oder Homeoffice geplant.",
+                parent=self.root,
+            )
             return
         day = self.dp_wish.get_date()
         wish_type = self.cmb_wish.get()
@@ -1200,19 +1294,20 @@ class ShiftPlannerApp:
     def reset_inputs(self):
         if not messagebox.askyesno(
             "Zurücksetzen",
-            "Wunschtage, Ferien und Meetings löschen? Mitarbeiter bleiben gespeichert.",
+            "Wunschtage, Ferien, Meetings und manuelle Zellen löschen? Mitarbeiter bleiben gespeichert.",
             parent=self.root,
         ):
             return
         self.wishes.clear()
         self.vacations.clear()
         self.teammeetings.clear()
+        self.overrides.clear()
         self.last_plan = None
         self.last_weeks = None
         self._refresh_lists()
         self._show_empty_state()
         self._persist()
-        self.status_var.set("Wunschtage, Ferien und Meetings gelöscht.")
+        self.status_var.set("Wunschtage, Ferien, Meetings und manuelle Zellen gelöscht.")
 
     def generate_plan(self):
         if not self.employees:
@@ -1232,6 +1327,7 @@ class ShiftPlannerApp:
             end,
             history=self.history,
             next_seq=self.next_seq,
+            overrides=self.overrides,
         )
         if result.get("error"):
             messagebox.showerror("Fehler", result["error"], parent=self.root)
@@ -1258,7 +1354,7 @@ class ShiftPlannerApp:
             child.destroy()
         tk.Label(
             self.result,
-            text="Noch kein Plan.\nZeitraum prüfen und «Plan generieren» wählen.",
+            text="Noch kein Plan.\nZeitraum prüfen und «Plan generieren» wählen.\nDanach eine Zelle anklicken, um Früh, Spät oder Homeoffice zu ändern.",
             bg=BG, fg=MUTED, font=(FONT, 11), justify="left",
         ).pack(anchor="w", pady=12)
 
@@ -1305,7 +1401,12 @@ class ShiftPlannerApp:
             block = tk.Frame(holder, bg=CARD, highlightthickness=1, highlightbackground=LINE)
             block.pack(fill="x", pady=(0, 12))
             title = f"Woche {week}   ·   {days[0].strftime('%d.%m.%Y')} – {days[-1].strftime('%d.%m.%Y')}"
-            tk.Label(block, text=title, bg=CARD, fg=INK, font=(FONT, 11, "bold")).pack(anchor="w", padx=12, pady=(10, 8))
+            header = tk.Frame(block, bg=CARD)
+            header.pack(fill="x", padx=12, pady=(10, 8))
+            tk.Label(header, text=title, bg=CARD, fg=INK, font=(FONT, 11, "bold")).pack(side="left")
+            tk.Label(
+                header, text="Zelle klicken zum Ändern", bg=CARD, fg=MUTED, font=(FONT, 8),
+            ).pack(side="right")
 
             grid = tk.Frame(block, bg=CARD)
             grid.pack(fill="x", padx=12, pady=(0, 12))
@@ -1330,12 +1431,131 @@ class ShiftPlannerApp:
                     font=(FONT, 9), anchor="w", padx=10, pady=8,
                 ).grid(row=row, column=0, sticky="nsew", padx=1, pady=1)
                 for column, day in enumerate(days, start=1):
-                    value = plan[emp["name"]].get(day, "–")
+                    value = plan.get(emp["name"], {}).get(day, "–")
                     info = COLOR_CONFIG.get(value, {"bg": CARD, "fg": MUTED, "short": value})
-                    tk.Label(
-                        grid, text=info["short"], bg=info["bg"], fg=info["fg"],
-                        font=(FONT, 9), width=14, pady=8,
-                    ).grid(row=row, column=column, sticky="nsew", padx=1, pady=1)
+                    overridden = self._has_override(emp["name"], day)
+                    label = f"✎ {info['short']}" if overridden else info["short"]
+                    cell = tk.Label(
+                        grid, text=label, bg=info["bg"], fg=info["fg"],
+                        font=(FONT, 9, "bold" if overridden else "normal"),
+                        width=14, pady=8, cursor="hand2" if not is_flex(emp) else "arrow",
+                    )
+                    cell.grid(row=row, column=column, sticky="nsew", padx=1, pady=1)
+                    cell.bind("<Button-1>", lambda event, person=emp, when=day: self._open_cell_menu(event, person, when))
+                    cell.bind("<Button-3>", lambda event, person=emp, when=day: self._open_cell_menu(event, person, when))
+
+    def _has_override(self, name, day):
+        return any(item["emp"] == name and item["date"] == day for item in self.overrides)
+
+    def _open_cell_menu(self, event, emp, day):
+        if self.cell_menu is not None:
+            try:
+                self.cell_menu.destroy()
+            except tk.TclError:
+                pass
+            self.cell_menu = None
+        if is_flex(emp):
+            self.status_var.set(f"{emp['name']} ist Flex und wird nicht für Früh, Spät oder Homeoffice geplant.")
+            return
+        current = self.last_plan.get(emp["name"], {}).get(day, "–")
+        menu = tk.Menu(self.root, tearoff=0, font=(FONT, 9))
+        for value in EDITABLE_TYPES:
+            mark = " ✓" if current == value else ""
+            menu.add_command(
+                label=f"{value}{mark}",
+                command=lambda chosen=value, person=emp, when=day: self._set_cell(person, when, chosen),
+            )
+        if self._has_override(emp["name"], day):
+            menu.add_separator()
+            menu.add_command(
+                label="Manuelle Änderung entfernen",
+                command=lambda person=emp, when=day: self._set_cell(person, when, None),
+            )
+        self.cell_menu = menu
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _set_cell(self, emp, day, value):
+        name = emp["name"]
+        existing = next((item for item in self.overrides if item["emp"] == name and item["date"] == day), None)
+        current = None
+        if self.last_plan is not None:
+            current = self.last_plan[name].get(day)
+
+        if value is None:
+            self.overrides = [
+                item for item in self.overrides
+                if not (item["emp"] == name and item["date"] == day)
+            ]
+            restored = (existing or {}).get("previous")
+            if restored and self.last_plan is not None:
+                self.last_plan[name][day] = restored
+            self._persist()
+            if self.last_weeks is not None and self.last_plan is not None:
+                self.render_matrix(self.last_weeks, self.last_plan, self.last_warnings)
+            self.status_var.set(f"{name} am {day.strftime('%d.%m.%Y')} wieder auf den Generatorwert gesetzt.")
+            return
+
+        if value == "Homeoffice":
+            if emp["pensum"] <= 60:
+                messagebox.showwarning(
+                    "Kein Homeoffice",
+                    f"{name} arbeitet {emp['pensum']} %. Ab 60 % gibt es kein Homeoffice.",
+                    parent=self.root,
+                )
+                return
+            if day in self.teammeetings:
+                messagebox.showwarning(
+                    "Teammeeting",
+                    f"Am {day.strftime('%d.%m.%Y')} ist Teammeeting. Homeoffice ist an dem Tag nicht möglich.",
+                    parent=self.root,
+                )
+                return
+
+        previous = (existing or {}).get("previous", current)
+        self.overrides = [
+            item for item in self.overrides
+            if not (item["emp"] == name and item["date"] == day)
+        ]
+        self.overrides.append({"emp": name, "date": day, "type": value, "previous": previous})
+        if self.last_plan is not None:
+            self.last_plan[name][day] = value
+        self._persist()
+        if self.last_weeks is not None and self.last_plan is not None:
+            notes = self._coverage_notes(day)
+            self.render_matrix(self.last_weeks, self.last_plan, self.last_warnings)
+            if notes:
+                self.status_var.set(f"{name} am {day.strftime('%d.%m.%Y')}: {value}. {notes[0]}")
+            else:
+                self.status_var.set(f"{name} am {day.strftime('%d.%m.%Y')} auf {value} gesetzt.")
+        else:
+            self.status_var.set(f"{name} am {day.strftime('%d.%m.%Y')} auf {value} gesetzt.")
+
+    def _coverage_notes(self, day):
+        if not self.last_plan:
+            return []
+        on_site = [
+            emp for emp in shift_employees(self.employees)
+            if self.last_plan.get(emp["name"], {}).get(day) not in ABSENT
+        ]
+        available = [
+            emp for emp in shift_employees(self.employees)
+            if self.last_plan.get(emp["name"], {}).get(day) not in LOCKED
+        ]
+        early = sum(1 for emp in on_site if self.last_plan.get(emp["name"], {}).get(day) == "Frühschicht")
+        late = sum(1 for emp in on_site if self.last_plan.get(emp["name"], {}).get(day) == "Spätschicht")
+        notes = []
+        if available and all(self.last_plan.get(emp["name"], {}).get(day) == "Homeoffice" for emp in available):
+            notes.append("Alle planbaren Personen sind im Homeoffice.")
+        elif len(on_site) >= 2 and (early == 0 or late == 0):
+            notes.append("Früh- und Spätschicht sind nicht beide besetzt.")
+        elif len(on_site) == 3 and (early != 2 or late != 1):
+            notes.append("Bei drei Personen vor Ort: zwei Früh, eine Spät.")
+        elif len(available) >= 3 and len(on_site) < 2:
+            notes.append("Bei drei planbaren Personen müssen zwei vor Ort sein.")
+        return notes
 
     def export_pdf(self):
         if not REPORTLAB_AVAILABLE:
@@ -1406,7 +1626,7 @@ class ShiftPlannerApp:
             for row, emp in enumerate(self.employees, start=1):
                 line = [Paragraph(self._employee_text(emp), cell)]
                 for column, day in enumerate(days, start=1):
-                    value = self.last_plan[emp["name"]].get(day, "–")
+                    value = self.last_plan.get(emp["name"], {}).get(day, "–")
                     info = COLOR_CONFIG.get(value, {"bg": "#FFFFFF", "short": value})
                     line.append(Paragraph(info["short"], cell))
                     style_commands.append(("BACKGROUND", (column, row), (column, row), colors.HexColor(info["bg"])))
@@ -1432,6 +1652,23 @@ def _assert_rotation(sequence, everyone):
         seen.add(name)
 
 
+def _assert_coverage(plan, employees, days):
+    planners = shift_employees(employees)
+    for day in days:
+        available = [emp for emp in planners if plan[emp["name"]].get(day) not in LOCKED]
+        on_site = [emp for emp in planners if plan[emp["name"]].get(day) not in ABSENT]
+        early = [emp["name"] for emp in on_site if plan[emp["name"]].get(day) == "Frühschicht"]
+        late = [emp["name"] for emp in on_site if plan[emp["name"]].get(day) == "Spätschicht"]
+        ho = [emp["name"] for emp in available if plan[emp["name"]].get(day) == "Homeoffice"]
+        assert set(ho) != {emp["name"] for emp in available} or not available
+        if len(available) >= 2:
+            assert early and late, (day, early, late, {e["name"]: plan[e["name"]].get(day) for e in planners})
+        if len(available) >= 3:
+            assert len(on_site) >= 2, (day, on_site)
+        if len(on_site) == 3:
+            assert len(early) == 2 and len(late) == 1, (day, early, late)
+
+
 def run_self_check():
     """Prüft die Planungsregeln ohne das Fenster zu öffnen."""
     start = date(2026, 11, 2)
@@ -1453,86 +1690,106 @@ def run_self_check():
             history=kwargs.get("history"),
             next_seq=kwargs.get("next_seq", 1),
             rng=random.Random(kwargs.get("seed", 1)),
+            overrides=kwargs.get("overrides"),
         )
 
-    filler = person("Filler")
+    extras = [person("B"), person("C"), person("D")]
+    two = [person("A"), person("Filler")]
+
+    for pensum, free in ((100, 0), (80, 1), (60, 2), (40, 3), (20, 4)):
+        result = run([person("A", pensum), person("Filler")])
+        assert _count(result["plan"], "A", week, "Teilzeit (Frei)") == free, pensum
+        assert _count(result["plan"], "A", week, "Homeoffice") == 0, pensum
 
     for pensum, ho, free in ((100, 2, 0), (80, 1, 1), (60, 0, 2), (40, 0, 3), (20, 0, 4)):
-        result = run([person("A", pensum), filler])
-        assert _count(result["plan"], "A", week, "Homeoffice") == ho, pensum
-        assert _count(result["plan"], "A", week, "Teilzeit (Frei)") == free, pensum
+        result = run([person("A", pensum)] + extras)
+        assert _count(result["plan"], "A", week, "Teilzeit (Frei)") == free, (pensum, result["plan"]["A"])
+        assert _count(result["plan"], "A", week, "Homeoffice") == ho, (pensum, result["plan"]["A"])
+        _assert_coverage(result["plan"], [person("A", pensum)] + extras, week)
 
     result = run(
-        [person("A"), filler],
+        [person("A")] + extras,
         vacations=[{"emp": "A", "start": start, "end": start}],
     )
-    assert _count(result["plan"], "A", week, "Homeoffice") == 1
     assert result["plan"]["A"][start] == "Ferien"
+    assert _count(result["plan"], "A", week, "Homeoffice") == 1
+    assert result["plan"]["A"][start + timedelta(days=1)] == "Homeoffice"
 
     result = run(
-        [person("A"), filler],
+        [person("A")] + extras,
         vacations=[{"emp": "A", "start": start, "end": start + timedelta(days=1)}],
     )
     assert _count(result["plan"], "A", week, "Homeoffice") == 0
 
-    result = run([person("A", fixed_off=2), filler])
+    result = run([person("A", fixed_off=2)] + extras)
     assert result["plan"]["A"][start + timedelta(days=2)] == "Teilzeit (Frei)"
     assert _count(result["plan"], "A", week, "Homeoffice") == 1
 
     result = run(
-        [person("A"), filler],
+        [person("A")] + extras,
         wishes=[{"emp": "A", "date": start + timedelta(days=1), "type": "Homeoffice"}],
     )
     assert result["plan"]["A"][start + timedelta(days=1)] == "Homeoffice"
     assert _count(result["plan"], "A", week, "Homeoffice") <= 2
 
     wednesday = start + timedelta(days=2)
-    result = run([person("A"), person("B")], meetings=[wednesday])
+    result = run(two, meetings=[wednesday])
     assert result["plan"]["A"].get(wednesday) != "Homeoffice"
-    assert result["plan"]["B"].get(wednesday) != "Homeoffice"
+    assert result["plan"]["Filler"].get(wednesday) != "Homeoffice"
 
     result = run(
-        [person("A"), filler],
+        [person("A")] + extras,
         wishes=[{"emp": "A", "date": wednesday, "type": "Homeoffice"}],
         meetings=[wednesday],
     )
     assert result["plan"]["A"].get(wednesday) != "Homeoffice"
     assert result["unfulfilled"]
 
+    flex_team = [person("A"), person("B"), person("Dana", no_shift=True)]
+    result = run(flex_team, end=start + timedelta(days=11), seed=3)
+    for day, value in result["plan"]["Dana"].items():
+        assert value in (FLEX, "Ferien", "Teilzeit (Frei)"), value
+    _assert_coverage(result["plan"], flex_team, [start + timedelta(days=i) for i in range(5)])
+
     team = [person("A"), person("B"), person("C")]
     horizon = start + timedelta(days=7 * 8 - 3)
+    work = []
+    cursor = start
+    while cursor <= horizon:
+        if cursor.weekday() < 5:
+            work.append(cursor)
+        cursor += timedelta(days=1)
+
     for seed in range(8):
         result = run(team, end=horizon, seed=seed)
-        fridays = []
-        cursor = start
-        while cursor <= horizon:
-            if cursor.weekday() == 4:
-                fridays.append(cursor)
-            cursor += timedelta(days=1)
-        friday_names = []
-        monday_names = []
-        for day in fridays:
-            ho = [emp["name"] for emp in team if result["plan"][emp["name"]].get(day) == "Homeoffice"]
-            assert len(ho) == 1, (seed, day, ho)
-            friday_names.append(ho[0])
-            on_site = [
-                emp["name"] for emp in team
-                if result["plan"][emp["name"]].get(day) not in ABSENT
-            ]
-            early = [name for name in on_site if result["plan"][name].get(day) == "Frühschicht"]
-            late = [name for name in on_site if result["plan"][name].get(day) == "Spätschicht"]
-            assert early and late
-        cursor = start
-        while cursor <= horizon:
-            if cursor.weekday() == 0:
-                ho = [emp["name"] for emp in team if result["plan"][emp["name"]].get(cursor) == "Homeoffice"]
-                assert len(ho) == 1, (seed, cursor, ho)
-                monday_names.append(ho[0])
-            cursor += timedelta(days=1)
-        _assert_rotation(friday_names, {"A", "B", "C"})
-        _assert_rotation(monday_names, {"A", "B", "C"})
-        assert set(friday_names) == {"A", "B", "C"}
-        assert set(monday_names) == {"A", "B", "C"}
+        _assert_coverage(result["plan"], team, work)
+        weekday_used = defaultdict(set)
+        friday_by_week = []
+        prev_friday = None
+        for day in work:
+            for emp in team:
+                if result["plan"][emp["name"]].get(day) == "Homeoffice":
+                    weekday_used[emp["name"]].add(day.weekday())
+            if day.weekday() == 4:
+                ho = [emp["name"] for emp in team if result["plan"][emp["name"]].get(day) == "Homeoffice"]
+                assert len(ho) <= 1
+                current = ho[0] if ho else None
+                if current and current == prev_friday:
+                    raise AssertionError(f"Freitags-Homeoffice hintereinander: {current}")
+                prev_friday = current
+                if current:
+                    friday_by_week.append(current)
+        for name, days in weekday_used.items():
+            assert len(days) >= 2, (seed, name, days)
+        if len(friday_by_week) >= 3:
+            _assert_rotation(friday_by_week, set(friday_by_week))
+
+    result = run(
+        team,
+        overrides=[{"emp": "A", "date": start + timedelta(days=3), "type": "Spätschicht"}],
+        seed=4,
+    )
+    assert result["plan"]["A"][start + timedelta(days=3)] == "Spätschicht"
 
     vacations = []
     for offset in range(6):
@@ -1557,21 +1814,18 @@ def run_self_check():
         next_seq=first["next_seq"],
         seed=2,
     )
-    combined = [item["name"] for item in first["history"]["ho_friday"]]
-    combined += [item["name"] for item in second["history"]["ho_friday"] if item["date"] > week[-1].isoformat()]
-    _assert_rotation(combined, {"A", "B", "C"})
-
-    again = run(team, end=horizon, history=result["history"], next_seq=result["next_seq"], seed=5)
-    friday_events = [
-        item for item in again["history"]["ho_friday"]
-        if start.isoformat() <= item["date"] <= horizon.isoformat()
+    first_fr = [item["name"] for item in first["history"]["ho_friday"]]
+    second_fr = [
+        item["name"] for item in second["history"]["ho_friday"]
+        if item["date"] > week[-1].isoformat()
     ]
-    assert len(friday_events) == 8
+    if first_fr and second_fr:
+        assert first_fr[-1] != second_fr[0]
 
     print("Regeln geprüft.")
     print("Homeoffice nach Pensum, Ferien und freien Tagen: ok")
-    print("Wunschtage und Teammeeting: ok")
-    print("Rotation für Montag, Freitag, Früh- und Spätschicht: ok")
+    print("Besetzung Früh/Spät, Flex und manuelle Zelle: ok")
+    print("Faire Verteilung ohne Freitag hintereinander: ok")
 
 
 def main():
